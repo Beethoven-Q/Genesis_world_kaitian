@@ -160,6 +160,5 @@ outputs/
 genesis_firefly/output/
 genesis_firefly/**/temp/
 genesis_firefly/**/*.mp4
-genesis_firefly/**/*.png
 genesis_firefly/**/*.npz
 genesis_firefly/**/*.hdf5
