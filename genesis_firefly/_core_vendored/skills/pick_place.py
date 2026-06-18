@@ -19,7 +19,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from robolab.skills.grasp import (
+from .grasp import (
     grasp_waypoints, place_waypoints, orientation_aware_grasp_quat, GR100_GRASP_OFFSET_EE,
     tilted_base_quat, transport_quats, _R_from_wxyz)
 
