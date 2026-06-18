@@ -26,10 +26,11 @@ RIGHT_WRIST = (np.array([-0.0775236, 0.0049461, 0.0478084]),
                np.array([0.1369354, 0.7101610, -0.6780283, -0.1311402]))
 SIDE = (np.array([0.0450464, 0.0325720, 0.8155021]),
         np.array([0.6637329, 0.1897607, -0.1917309, -0.6976309]))
-# visible side rig
-SIDE_BODY_POS = np.array([0.0435222, 0.0001094, 0.8151689])
-SIDE_BODY_QUAT = np.array([0.0659103, -0.3983885, -0.6888077, -0.6020684])   # wxyz
-SIDE_STICK_R, SIDE_STICK_H = 0.008, 0.8151689
+# visible side rig — the camera MODEL sits at the camera's OPTICAL extrinsics (same eye the render uses),
+# and the STICK rises from the ground to that exact xy to HOLD it (owner-confirmed: model pose == extrinsics).
+SIDE_BODY_POS = SIDE[0].copy()        # = optical position (NOT the device-centre offset)
+SIDE_BODY_QUAT = SIDE[1].copy()       # = camera rot_opengl (lens faces where the camera looks)
+SIDE_STICK_R, SIDE_STICK_H = 0.008, float(SIDE[0][2])   # ground -> camera
 
 
 def _R(q):
@@ -71,8 +72,10 @@ def update_wrist_cams(cams):
 
 def add_side_camera_rig(scene):
     """The visible, collidable, world-fixed side-camera BODY + support STICK (reproduces the real rig)."""
+    # D435i body: 90mm baseline along the camera's RIGHT (local X), 25mm tall, 25mm deep — oriented by the
+    # camera rot so the lens faces where the camera looks, centred ON the optical pose.
     body = scene.add_entity(
-        gs.morphs.Box(size=(0.025, 0.090, 0.025), pos=tuple(SIDE_BODY_POS), quat=tuple(SIDE_BODY_QUAT),
+        gs.morphs.Box(size=(0.090, 0.025, 0.025), pos=tuple(SIDE_BODY_POS), quat=tuple(SIDE_BODY_QUAT),
                       fixed=True, collision=True),
         surface=gs.surfaces.Plastic(color=(0.10, 0.10, 0.11), roughness=0.5))
     stick = scene.add_entity(
