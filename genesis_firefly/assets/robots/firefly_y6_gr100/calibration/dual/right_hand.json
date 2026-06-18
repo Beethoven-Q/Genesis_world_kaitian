@@ -1,0 +1,54 @@
+{
+  "T_cam2gripper": [
+    [
+      0.04615979562576633,
+      0.9271029789631379,
+      0.3719534106114134,
+      -0.07752356573273136
+    ],
+    [
+      -0.9989339063969628,
+      0.043052687086916896,
+      0.016658835046298864,
+      0.004946063604487231
+    ],
+    [
+      -0.0005691382004854306,
+      -0.3723258418808333,
+      0.928101903644981,
+      0.04780841739228664
+    ],
+    [
+      0.0,
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "camera_type": "hand",
+  "method": "tsai",
+  "num_samples": 63,
+  "metrics": {
+    "board_consistency_error_mm": 2.8248110895566714
+  },
+  "data_dir": "/home/soma/Projects/soda-bimanual/hand_eye_calibration/data/20260617_012254",
+  "intrinsics": {
+    "fx": 651.25537109375,
+    "fy": 650.4459228515625,
+    "cx": 637.5696411132812,
+    "cy": 355.2769775390625
+  },
+  "validation": {
+    "train_test_passed": true
+  },
+  "filtering": {
+    "metric": "reprojection_error_px",
+    "threshold_px": 3.0,
+    "num_total": 63,
+    "num_inliers": 63,
+    "num_rejected": 0,
+    "mean_error_px": 0.15583389727342764,
+    "mean_inlier_error_px": 0.15583389727342764
+  },
+  "timestamp": "2026-06-17T01:28:15.979915"
+}

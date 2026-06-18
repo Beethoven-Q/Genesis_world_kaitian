@@ -1,0 +1,8 @@
+{
+  "right_base_in_left": [
+    0.0,
+    -0.448,
+    0.0
+  ],
+  "notes": "Right arm base position expressed in the left arm base frame."
+}

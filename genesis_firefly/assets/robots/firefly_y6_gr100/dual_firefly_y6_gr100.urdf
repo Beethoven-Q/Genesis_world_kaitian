@@ -1,0 +1,659 @@
+<robot name="dual_firefly_y6_gr100">
+  <link name="dual_base">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <mass value="0.001" />
+      <inertia ixx="1e-5" ixy="0" ixz="0" iyy="1e-5" iyz="0" izz="1e-5" />
+    </inertial>
+  </link>
+  <link name="left_base_link">
+    <inertial>
+      <origin xyz="-0.00015122 -0.00000305 0.04925993" rpy="0 0 0" />
+      <mass value="0.87430597" />
+      <inertia ixx="0.0013187" ixy="0.00000009" ixz="-0.00000212" iyy="0.00133505" iyz="0.00000013" izz="0.0010065" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="/home/kaitianchao/Projects/RoboLab_firefly/assets/robots/firefly_y6_gr100/source/xpkg_urdf_firefly_y6/meshes/base_link.STL" />
+      </geometry>
+      <material name="mat_left_base_link">
+        <color rgba="0.30 0.30 0.33 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="/home/kaitianchao/Projects/RoboLab_firefly/assets/robots/firefly_y6_gr100/source/xpkg_urdf_firefly_y6/meshes/base_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <link name="left_link_1">
+    <inertial>
+      <origin xyz="0.00671535 -0.00275632 0.02393862" rpy="0 0 0" />
+      <mass value="0.25449622" />
+      <inertia ixx="0.00036700" ixy="0.00000933" ixz="-0.00004363" iyy="0.00022812" iyz="0.00001848" izz="0.00032440" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="/home/kaitianchao/Projects/RoboLab_firefly/assets/robots/firefly_y6_gr100/source/xpkg_urdf_firefly_y6/meshes/link_1.STL" />
+      </geometry>
+      <material name="mat_left_link_1">
+        <color rgba="0.72 0.73 0.76 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="/home/kaitianchao/Projects/RoboLab_firefly/assets/robots/firefly_y6_gr100/source/xpkg_urdf_firefly_y6/meshes/link_1.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="left_joint_1" type="revolute">
+    <origin xyz="0 0 0.09505" rpy="0 0 0" />
+    <parent link="left_base_link" />
+    <child link="left_link_1" />
+    <axis xyz="0 0 1" />
+    <limit lower="-2.86" upper="2.86" effort="6" velocity="6" />
+  </joint>
+  <link name="left_link_2">
+    <inertial>
+      <origin xyz="-0.00065196 0.00050605 0.13439379" rpy="0 0 0" />
+      <mass value="1.28270343" />
+      <inertia ixx="0.01969749" ixy="-0.00000048" ixz="0.00002449" iyy="0.01949532" iyz="0.00000402" izz="0.00071320" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="/home/kaitianchao/Projects/RoboLab_firefly/assets/robots/firefly_y6_gr100/source/xpkg_urdf_firefly_y6/meshes/link_2.STL" />
+      </geometry>
+      <material name="mat_left_link_2">
+        <color rgba="0.93 0.34 0.03 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="/home/kaitianchao/Projects/RoboLab_firefly/assets/robots/firefly_y6_gr100/source/xpkg_urdf_firefly_y6/meshes/link_2.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="left_joint_2" type="revolute">
+    <origin xyz="0.02 0 0.05" rpy="0 0 0" />
+    <parent link="left_link_1" />
+    <child link="left_link_2" />
+    <axis xyz="0 1 0" />
+    <limit lower="-1.57" upper="2.09" effort="6" velocity="6" />
+  </joint>
+  <link name="left_link_3">
+    <inertial>
+      <origin xyz="-0.05668605 -0.00287518  0.15455959" rpy="0 0 0" />
+      <mass value="0.93588267" />
+      <inertia ixx="0.00983649" ixy="0.00007803" ixz="0.00124619" iyy="0.00991413" iyz="-0.00026866" izz="0.00104920" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="/home/kaitianchao/Projects/RoboLab_firefly/assets/robots/firefly_y6_gr100/source/xpkg_urdf_firefly_y6/meshes/link_3.STL" />
+      </geometry>
+      <material name="mat_left_link_3">
+        <color rgba="0.93 0.34 0.03 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="/home/kaitianchao/Projects/RoboLab_firefly/assets/robots/firefly_y6_gr100/source/xpkg_urdf_firefly_y6/meshes/link_3.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="left_joint_3" type="revolute">
+    <origin xyz="0 0 0.27" rpy="0 0 0" />
+    <parent link="left_link_2" />
+    <child link="left_link_3" />
+    <axis xyz="0 1 0" />
+    <limit lower="0" upper="3.14" effort="6" velocity="6" />
+  </joint>
+  <link name="left_link_4">
+    <inertial>
+      <origin xyz="-0.05184192 -0.00200161 0.04855136" rpy="0 0 0" />
+      <mass value="0.55059939" />
+      <inertia ixx="0.00075566" ixy="0.00005198" ixz="0.00037393" iyy="0.00098159" iyz="-0.00004878" izz="0.00079856" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="/home/kaitianchao/Projects/RoboLab_firefly/assets/robots/firefly_y6_gr100/source/xpkg_urdf_firefly_y6/meshes/link_4.STL" />
+      </geometry>
+      <material name="mat_left_link_4">
+        <color rgba="0.60 0.61 0.63 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="/home/kaitianchao/Projects/RoboLab_firefly/assets/robots/firefly_y6_gr100/source/xpkg_urdf_firefly_y6/meshes/link_4.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="left_joint_4" type="revolute">
+    <origin xyz="-0.065 0 0.25" rpy="0 0 0" />
+    <parent link="left_link_3" />
+    <child link="left_link_4" />
+    <axis xyz="0 1 0" />
+    <limit lower="-1.57" upper="1.57" effort="6" velocity="6" />
+  </joint>
+  <link name="left_link_5">
+    <inertial>
+      <origin xyz="0.04236212 -0.00000333 0.00771096" rpy="0 0 0" />
+      <mass value="0.41052864" />
+      <inertia ixx="0.0001862" ixy="-0.00000002" ixz="-0.00001795" iyy="0.00025554" iyz="-0.00000002" izz="0.0002374" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="/home/kaitianchao/Projects/RoboLab_firefly/assets/robots/firefly_y6_gr100/source/xpkg_urdf_firefly_y6/meshes/link_5.STL" />
+      </geometry>
+      <material name="mat_left_link_5">
+        <color rgba="0.72 0.73 0.76 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="/home/kaitianchao/Projects/RoboLab_firefly/assets/robots/firefly_y6_gr100/source/xpkg_urdf_firefly_y6/meshes/link_5.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="left_joint_5" type="revolute">
+    <origin xyz="-0.047 0 0.065" rpy="0 0 0" />
+    <parent link="left_link_4" />
+    <child link="left_link_5" />
+    <axis xyz="-1 0 0" />
+    <limit lower="-1.54" upper="1.54" effort="6" velocity="6" />
+  </joint>
+  <link name="left_link_6">
+    <inertial>
+      <origin xyz="-0.00048907 0 0.0034393" rpy="0 0 0" />
+      <mass value="0.0076012" />
+      <inertia ixx="0.00000089" ixy="0" ixz="0" iyy="0.00000065" iyz="0" izz="0.00000143" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="/home/kaitianchao/Projects/RoboLab_firefly/assets/robots/firefly_y6_gr100/source/xpkg_urdf_firefly_y6/meshes/link_6.STL" />
+      </geometry>
+      <material name="mat_left_link_6">
+        <color rgba="0.12 0.12 0.13 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="/home/kaitianchao/Projects/RoboLab_firefly/assets/robots/firefly_y6_gr100/source/xpkg_urdf_firefly_y6/meshes/link_6.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="left_joint_6" type="revolute">
+    <origin xyz="0.047 0 0.034" rpy="0 0 0" />
+    <parent link="left_link_5" />
+    <child link="left_link_6" />
+    <axis xyz="0 0 1" />
+    <limit lower="-2.79" upper="2.79" effort="6" velocity="6" />
+  </joint>
+  <link name="left_gripper_base_link">
+    <inertial>
+      <origin xyz="-0.00386337 0.00001755 0.04222242" rpy="0 0 0" />
+      <mass value="0.47163661" />
+      <inertia ixx="0.00032421" ixy="0.00000064" ixz="0.00004032" iyy="0.00032388" iyz="0.00000041" izz="0.00022576" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="/home/kaitianchao/Projects/RoboLab_firefly/assets/robots/firefly_y6_gr100/source/xpkg_urdf_gr100/meshes/base_link.STL" />
+      </geometry>
+      <material name="mat_left_gripper_base_link">
+        <color rgba="0.74 0.75 0.78 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="/home/kaitianchao/Projects/RoboLab_firefly/assets/robots/firefly_y6_gr100/source/xpkg_urdf_gr100/meshes/base_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="left_gripper_base_joint" type="fixed">
+    <origin xyz="0 0 0" rpy="0 0 1.5707963" />
+    <parent link="left_link_6" />
+    <child link="left_gripper_base_link" />
+  </joint>
+  <link name="left_gripper_left_link_1">
+    <inertial>
+      <origin xyz="0.01344478 -0.02402636 0.03494436" rpy="0 0 0" />
+      <mass value="0.02806607" />
+      <inertia ixx="0.00002286" ixy="0.00000088" ixz="-0.00000130" iyy="0.00001838" iyz="0.00000883" izz="0.00000630" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="/home/kaitianchao/Projects/RoboLab_firefly/assets/robots/firefly_y6_gr100/source/xpkg_urdf_gr100/meshes/L1.STL" />
+      </geometry>
+      <material name="mat_left_gripper_left_link_1">
+        <color rgba="0.74 0.75 0.78 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="/home/kaitianchao/Projects/RoboLab_firefly/assets/robots/firefly_y6_gr100/source/xpkg_urdf_gr100/meshes/L1.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="left_gripper_left_joint_1" type="revolute">
+    <origin xyz="-0.015 0.01475 0.07679888" rpy="0 1.57079633 -1.57079633" />
+    <parent link="left_gripper_base_link" />
+    <child link="left_gripper_left_link_1" />
+    <axis xyz="0 0 -1" />
+    <limit lower="0.0" upper="0.9" effort="5" velocity="10" />
+  </joint>
+  <link name="left_gripper_right_link_1">
+    <inertial>
+      <origin xyz="0.01341406 0.02402380 0.03494613" rpy="0 0 0" />
+      <mass value="0.02806607" />
+      <inertia ixx="0.00002286" ixy="-0.00000087" ixz="-0.00000129" iyy="0.00001838" iyz="-0.00000883" izz="0.00000629" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="/home/kaitianchao/Projects/RoboLab_firefly/assets/robots/firefly_y6_gr100/source/xpkg_urdf_gr100/meshes/L2.STL" />
+      </geometry>
+      <material name="mat_left_gripper_right_link_1">
+        <color rgba="0.74 0.75 0.78 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="/home/kaitianchao/Projects/RoboLab_firefly/assets/robots/firefly_y6_gr100/source/xpkg_urdf_gr100/meshes/L2.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="left_gripper_right_joint_1" type="revolute">
+    <origin xyz="0.015 0.01475 0.07679888" rpy="0 1.57079633 -1.57079633" />
+    <parent link="left_gripper_base_link" />
+    <child link="left_gripper_right_link_1" />
+    <axis xyz="0 0 -1" />
+    <limit lower="-0.9" upper="0.9" effort="5" velocity="10" />
+  </joint>
+  <link name="left_ee_link">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <mass value="0.001" />
+      <inertia ixx="0.000001" ixy="0" ixz="0" iyy="0.000001" iyz="0" izz="0.000001" />
+    </inertial>
+  </link>
+  <joint name="left_ee_joint" type="fixed">
+    <origin xyz="0 0 0.187" rpy="0 0 0" />
+    <parent link="left_gripper_base_link" />
+    <child link="left_ee_link" />
+  </joint>
+  <joint name="left_mount" type="fixed">
+    <origin xyz="0 0.224 0" rpy="0 0 0" />
+    <parent link="dual_base" />
+    <child link="left_base_link" />
+  </joint>
+  <link name="right_base_link">
+    <inertial>
+      <origin xyz="-0.00015122 -0.00000305 0.04925993" rpy="0 0 0" />
+      <mass value="0.87430597" />
+      <inertia ixx="0.0013187" ixy="0.00000009" ixz="-0.00000212" iyy="0.00133505" iyz="0.00000013" izz="0.0010065" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="/home/kaitianchao/Projects/RoboLab_firefly/assets/robots/firefly_y6_gr100/source/xpkg_urdf_firefly_y6/meshes/base_link.STL" />
+      </geometry>
+      <material name="mat_right_base_link">
+        <color rgba="0.30 0.30 0.33 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="/home/kaitianchao/Projects/RoboLab_firefly/assets/robots/firefly_y6_gr100/source/xpkg_urdf_firefly_y6/meshes/base_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <link name="right_link_1">
+    <inertial>
+      <origin xyz="0.00671535 -0.00275632 0.02393862" rpy="0 0 0" />
+      <mass value="0.25449622" />
+      <inertia ixx="0.00036700" ixy="0.00000933" ixz="-0.00004363" iyy="0.00022812" iyz="0.00001848" izz="0.00032440" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="/home/kaitianchao/Projects/RoboLab_firefly/assets/robots/firefly_y6_gr100/source/xpkg_urdf_firefly_y6/meshes/link_1.STL" />
+      </geometry>
+      <material name="mat_right_link_1">
+        <color rgba="0.72 0.73 0.76 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="/home/kaitianchao/Projects/RoboLab_firefly/assets/robots/firefly_y6_gr100/source/xpkg_urdf_firefly_y6/meshes/link_1.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="right_joint_1" type="revolute">
+    <origin xyz="0 0 0.09505" rpy="0 0 0" />
+    <parent link="right_base_link" />
+    <child link="right_link_1" />
+    <axis xyz="0 0 1" />
+    <limit lower="-2.86" upper="2.86" effort="6" velocity="6" />
+  </joint>
+  <link name="right_link_2">
+    <inertial>
+      <origin xyz="-0.00065196 0.00050605 0.13439379" rpy="0 0 0" />
+      <mass value="1.28270343" />
+      <inertia ixx="0.01969749" ixy="-0.00000048" ixz="0.00002449" iyy="0.01949532" iyz="0.00000402" izz="0.00071320" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="/home/kaitianchao/Projects/RoboLab_firefly/assets/robots/firefly_y6_gr100/source/xpkg_urdf_firefly_y6/meshes/link_2.STL" />
+      </geometry>
+      <material name="mat_right_link_2">
+        <color rgba="0.93 0.34 0.03 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="/home/kaitianchao/Projects/RoboLab_firefly/assets/robots/firefly_y6_gr100/source/xpkg_urdf_firefly_y6/meshes/link_2.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="right_joint_2" type="revolute">
+    <origin xyz="0.02 0 0.05" rpy="0 0 0" />
+    <parent link="right_link_1" />
+    <child link="right_link_2" />
+    <axis xyz="0 1 0" />
+    <limit lower="-1.57" upper="2.09" effort="6" velocity="6" />
+  </joint>
+  <link name="right_link_3">
+    <inertial>
+      <origin xyz="-0.05668605 -0.00287518  0.15455959" rpy="0 0 0" />
+      <mass value="0.93588267" />
+      <inertia ixx="0.00983649" ixy="0.00007803" ixz="0.00124619" iyy="0.00991413" iyz="-0.00026866" izz="0.00104920" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="/home/kaitianchao/Projects/RoboLab_firefly/assets/robots/firefly_y6_gr100/source/xpkg_urdf_firefly_y6/meshes/link_3.STL" />
+      </geometry>
+      <material name="mat_right_link_3">
+        <color rgba="0.93 0.34 0.03 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="/home/kaitianchao/Projects/RoboLab_firefly/assets/robots/firefly_y6_gr100/source/xpkg_urdf_firefly_y6/meshes/link_3.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="right_joint_3" type="revolute">
+    <origin xyz="0 0 0.27" rpy="0 0 0" />
+    <parent link="right_link_2" />
+    <child link="right_link_3" />
+    <axis xyz="0 1 0" />
+    <limit lower="0" upper="3.14" effort="6" velocity="6" />
+  </joint>
+  <link name="right_link_4">
+    <inertial>
+      <origin xyz="-0.05184192 -0.00200161 0.04855136" rpy="0 0 0" />
+      <mass value="0.55059939" />
+      <inertia ixx="0.00075566" ixy="0.00005198" ixz="0.00037393" iyy="0.00098159" iyz="-0.00004878" izz="0.00079856" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="/home/kaitianchao/Projects/RoboLab_firefly/assets/robots/firefly_y6_gr100/source/xpkg_urdf_firefly_y6/meshes/link_4.STL" />
+      </geometry>
+      <material name="mat_right_link_4">
+        <color rgba="0.60 0.61 0.63 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="/home/kaitianchao/Projects/RoboLab_firefly/assets/robots/firefly_y6_gr100/source/xpkg_urdf_firefly_y6/meshes/link_4.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="right_joint_4" type="revolute">
+    <origin xyz="-0.065 0 0.25" rpy="0 0 0" />
+    <parent link="right_link_3" />
+    <child link="right_link_4" />
+    <axis xyz="0 1 0" />
+    <limit lower="-1.57" upper="1.57" effort="6" velocity="6" />
+  </joint>
+  <link name="right_link_5">
+    <inertial>
+      <origin xyz="0.04236212 -0.00000333 0.00771096" rpy="0 0 0" />
+      <mass value="0.41052864" />
+      <inertia ixx="0.0001862" ixy="-0.00000002" ixz="-0.00001795" iyy="0.00025554" iyz="-0.00000002" izz="0.0002374" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="/home/kaitianchao/Projects/RoboLab_firefly/assets/robots/firefly_y6_gr100/source/xpkg_urdf_firefly_y6/meshes/link_5.STL" />
+      </geometry>
+      <material name="mat_right_link_5">
+        <color rgba="0.72 0.73 0.76 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="/home/kaitianchao/Projects/RoboLab_firefly/assets/robots/firefly_y6_gr100/source/xpkg_urdf_firefly_y6/meshes/link_5.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="right_joint_5" type="revolute">
+    <origin xyz="-0.047 0 0.065" rpy="0 0 0" />
+    <parent link="right_link_4" />
+    <child link="right_link_5" />
+    <axis xyz="-1 0 0" />
+    <limit lower="-1.54" upper="1.54" effort="6" velocity="6" />
+  </joint>
+  <link name="right_link_6">
+    <inertial>
+      <origin xyz="-0.00048907 0 0.0034393" rpy="0 0 0" />
+      <mass value="0.0076012" />
+      <inertia ixx="0.00000089" ixy="0" ixz="0" iyy="0.00000065" iyz="0" izz="0.00000143" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="/home/kaitianchao/Projects/RoboLab_firefly/assets/robots/firefly_y6_gr100/source/xpkg_urdf_firefly_y6/meshes/link_6.STL" />
+      </geometry>
+      <material name="mat_right_link_6">
+        <color rgba="0.12 0.12 0.13 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="/home/kaitianchao/Projects/RoboLab_firefly/assets/robots/firefly_y6_gr100/source/xpkg_urdf_firefly_y6/meshes/link_6.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="right_joint_6" type="revolute">
+    <origin xyz="0.047 0 0.034" rpy="0 0 0" />
+    <parent link="right_link_5" />
+    <child link="right_link_6" />
+    <axis xyz="0 0 1" />
+    <limit lower="-2.79" upper="2.79" effort="6" velocity="6" />
+  </joint>
+  <link name="right_gripper_base_link">
+    <inertial>
+      <origin xyz="-0.00386337 0.00001755 0.04222242" rpy="0 0 0" />
+      <mass value="0.47163661" />
+      <inertia ixx="0.00032421" ixy="0.00000064" ixz="0.00004032" iyy="0.00032388" iyz="0.00000041" izz="0.00022576" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="/home/kaitianchao/Projects/RoboLab_firefly/assets/robots/firefly_y6_gr100/source/xpkg_urdf_gr100/meshes/base_link.STL" />
+      </geometry>
+      <material name="mat_right_gripper_base_link">
+        <color rgba="0.74 0.75 0.78 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="/home/kaitianchao/Projects/RoboLab_firefly/assets/robots/firefly_y6_gr100/source/xpkg_urdf_gr100/meshes/base_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="right_gripper_base_joint" type="fixed">
+    <origin xyz="0 0 0" rpy="0 0 1.5707963" />
+    <parent link="right_link_6" />
+    <child link="right_gripper_base_link" />
+  </joint>
+  <link name="right_gripper_left_link_1">
+    <inertial>
+      <origin xyz="0.01344478 -0.02402636 0.03494436" rpy="0 0 0" />
+      <mass value="0.02806607" />
+      <inertia ixx="0.00002286" ixy="0.00000088" ixz="-0.00000130" iyy="0.00001838" iyz="0.00000883" izz="0.00000630" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="/home/kaitianchao/Projects/RoboLab_firefly/assets/robots/firefly_y6_gr100/source/xpkg_urdf_gr100/meshes/L1.STL" />
+      </geometry>
+      <material name="mat_right_gripper_left_link_1">
+        <color rgba="0.74 0.75 0.78 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="/home/kaitianchao/Projects/RoboLab_firefly/assets/robots/firefly_y6_gr100/source/xpkg_urdf_gr100/meshes/L1.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="right_gripper_left_joint_1" type="revolute">
+    <origin xyz="-0.015 0.01475 0.07679888" rpy="0 1.57079633 -1.57079633" />
+    <parent link="right_gripper_base_link" />
+    <child link="right_gripper_left_link_1" />
+    <axis xyz="0 0 -1" />
+    <limit lower="0.0" upper="0.9" effort="5" velocity="10" />
+  </joint>
+  <link name="right_gripper_right_link_1">
+    <inertial>
+      <origin xyz="0.01341406 0.02402380 0.03494613" rpy="0 0 0" />
+      <mass value="0.02806607" />
+      <inertia ixx="0.00002286" ixy="-0.00000087" ixz="-0.00000129" iyy="0.00001838" iyz="-0.00000883" izz="0.00000629" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="/home/kaitianchao/Projects/RoboLab_firefly/assets/robots/firefly_y6_gr100/source/xpkg_urdf_gr100/meshes/L2.STL" />
+      </geometry>
+      <material name="mat_right_gripper_right_link_1">
+        <color rgba="0.74 0.75 0.78 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="/home/kaitianchao/Projects/RoboLab_firefly/assets/robots/firefly_y6_gr100/source/xpkg_urdf_gr100/meshes/L2.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="right_gripper_right_joint_1" type="revolute">
+    <origin xyz="0.015 0.01475 0.07679888" rpy="0 1.57079633 -1.57079633" />
+    <parent link="right_gripper_base_link" />
+    <child link="right_gripper_right_link_1" />
+    <axis xyz="0 0 -1" />
+    <limit lower="-0.9" upper="0.9" effort="5" velocity="10" />
+  </joint>
+  <link name="right_ee_link">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <mass value="0.001" />
+      <inertia ixx="0.000001" ixy="0" ixz="0" iyy="0.000001" iyz="0" izz="0.000001" />
+    </inertial>
+  </link>
+  <joint name="right_ee_joint" type="fixed">
+    <origin xyz="0 0 0.187" rpy="0 0 0" />
+    <parent link="right_gripper_base_link" />
+    <child link="right_ee_link" />
+  </joint>
+  <joint name="right_mount" type="fixed">
+    <origin xyz="0 -0.224 0" rpy="0 0 0" />
+    <parent link="dual_base" />
+    <child link="right_base_link" />
+  </joint>
+  <link name="left_camera_body">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <mass value="0.045" />
+      <inertia ixx="1e-5" ixy="0" ixz="0" iyy="1e-5" iyz="0" izz="1e-5" />
+    </inertial>
+    <visual>
+      <origin xyz="0.0038 -0.009 0" rpy="1.5707963 0 1.5707963" />
+      <geometry>
+        <mesh filename="/home/kaitianchao/Projects/RoboLab_firefly/assets/robots/firefly_y6_gr100/source/firefly_y6/d405.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+      <material name="mat_left_camera_body">
+        <color rgba="0.667 0.698 0.769 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.0078 -0.009 0" rpy="0 0 0" />
+      <geometry>
+        <box size="0.023 0.042 0.042" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="left_camera_body_joint" type="fixed">
+    <origin xyz="-0.0810919 0.009825 0.0452576" rpy="0.0498762 -1.1945981 -0.0764085" />
+    <parent link="left_link_6" />
+    <child link="left_camera_body" />
+  </joint>
+  <link name="right_camera_body">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <mass value="0.045" />
+      <inertia ixx="1e-5" ixy="0" ixz="0" iyy="1e-5" iyz="0" izz="1e-5" />
+    </inertial>
+    <visual>
+      <origin xyz="0.0038 -0.009 0" rpy="1.5707963 0 1.5707963" />
+      <geometry>
+        <mesh filename="/home/kaitianchao/Projects/RoboLab_firefly/assets/robots/firefly_y6_gr100/source/firefly_y6/d405.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+      <material name="mat_right_camera_body">
+        <color rgba="0.667 0.698 0.769 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.0078 -0.009 0" rpy="0 0 0" />
+      <geometry>
+        <box size="0.023 0.042 0.042" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="right_camera_body_joint" type="fixed">
+    <origin xyz="-0.0775236 0.0049461 0.0478084" rpy="0.0015286 -1.1892821 0.0447575" />
+    <parent link="right_link_6" />
+    <child link="right_camera_body" />
+  </joint>
+</robot>

@@ -1,0 +1,108 @@
+{
+  "T_cam2base": [
+    [
+      -0.04689909498355852,
+      -0.8533150661447264,
+      0.5192820743874607,
+      0.04504644233189203
+    ],
+    [
+      -0.9988470451832034,
+      0.04539586959519467,
+      -0.015613947370197778,
+      -0.1914280280948176
+    ],
+    [
+      -0.010249644799034785,
+      -0.5194156456193029,
+      -0.8544602576289761,
+      0.5655020574215218
+    ],
+    [
+      0.0,
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "T_right_base_in_left": [
+    [
+      0.9997635667619623,
+      0.017393525703545194,
+      0.013048978465740092,
+      -0.012718110270207512
+    ],
+    [
+      -0.017687980032552307,
+      0.9995835628876221,
+      0.02279991594842848,
+      -0.44785398559857764
+    ],
+    [
+      -0.012646973462740674,
+      -0.02302533536102102,
+      0.9996548844444992,
+      0.0060555022764054835
+    ],
+    [
+      0.0,
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "camera_type": "side",
+  "base_frame": "left",
+  "method": "dual_arm_joint_reprojection",
+  "num_samples": 40,
+  "num_samples_left": 20,
+  "num_samples_right": 20,
+  "num_samples_total": 40,
+  "source_hand_calibration": {
+    "left": "/home/soma/Projects/soda-bimanual/hand_eye_calibration/results/dual/left_hand.json",
+    "right": "/home/soma/Projects/soda-bimanual/hand_eye_calibration/results/dual/right_hand.json"
+  },
+  "robot_config": {
+    "arm_type": "firefly_y6",
+    "gripper_type": "empty"
+  },
+  "joint_offsets_deg": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+  ],
+  "metrics": {
+    "cross_camera_alignment_error_mm": 1.718240530016209,
+    "side_reprojection_error_px": 2.180347568930446,
+    "left": {
+      "board_consistency_error_mm": 0.14750371658172012,
+      "board_consistency_error_deg": 0.06302157331423787,
+      "cross_camera_alignment_error_mm": 1.5098675796816194,
+      "cross_camera_alignment_error_deg": 0.39941095777145147,
+      "side_reprojection_error_px": 2.014471707039318
+    },
+    "right": {
+      "board_consistency_error_mm": 0.39829403236259325,
+      "board_consistency_error_deg": 0.33409005804023156,
+      "cross_camera_alignment_error_mm": 1.718240530016209,
+      "cross_camera_alignment_error_deg": 0.4607103630857713,
+      "side_reprojection_error_px": 2.3462234308215737
+    }
+  },
+  "optimization": {
+    "loss": "soft_l1",
+    "f_scale_px": 3.0,
+    "final_mean_reprojection_error_px": 2.180347568930446,
+    "least_squares_success": true
+  },
+  "intrinsics": {
+    "fx": 908.0689086914062,
+    "fy": 908.7244873046875,
+    "cx": 651.33984375,
+    "cy": 378.4701232910156
+  },
+  "timestamp": "2026-06-17T01:35:13.068142"
+}

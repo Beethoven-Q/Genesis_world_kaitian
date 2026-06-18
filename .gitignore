@@ -154,3 +154,12 @@ uv.lock
 
 # alarm.yml outputs
 outputs/
+
+# ===== genesis_firefly (our fork branch) — keep engine tree clean of our artifacts =====
+.venv/
+genesis_firefly/output/
+genesis_firefly/**/temp/
+genesis_firefly/**/*.mp4
+genesis_firefly/**/*.png
+genesis_firefly/**/*.npz
+genesis_firefly/**/*.hdf5
