@@ -26,7 +26,10 @@ phase lands. Requirements live in [project_overview.md](project_overview.md) (bl
 - `plan_pick_place` / `reachable_grasp_quat` / `score_pick_place` — pick-place + physical scoring.
 - `virtual_ee` *(planned)* — treat an object feature (mug ring center+normal, screw tip, peg) as a virtual EE →
   threading / screwing / pegging.
-- (more: grasp primitives, penetration metric, collision-free planning around distractors.)
+- `penetration` (`skills/penetration.py`) — faithful batched solid-solid interpenetration monitor read straight
+  from the solver contact buffer (`max_penetration` / `abnormal_penetration` / `PenetrationTracker`); the owner
+  #1 collision gate that rejects any demo with abnormal penetration. *(built — see §3g + progress log)*
+- (more: grasp primitives, collision-free planning around distractors.)
 
 ## Progress log
 - **2026-06-17/18 — B0–B8 reproduction.** Dual Firefly Y6 + GR100 imported to Genesis (interleaved dofs, MIT
@@ -104,3 +107,30 @@ phase lands. Requirements live in [project_overview.md](project_overview.md) (bl
   Offline placement verified over **1500 seeds**: 0 corridor violations, all on-table, no stacking. Preview:
   `output/temp/distractors_preview.png` (four-view, K=3 banana+apple+pen) + `distractors_third.png`. See
   `domain_randomization.md` (distractor subsection now ✅).
+- **2026-06-19 — PENETRATION DETECTOR / GATE (owner #1 enforcement).** *Problem:* collision correctness was
+  asserted but not **measured + enforced every demo**; abnormal interpenetration produces unphysical, harmful
+  training data, so we need a faithful detector that flags & **rejects** any penetrating demo (never ship it).
+  *Change:* new reusable `skills/penetration.py` — `max_penetration(scene, redetect=False)` returns per-env
+  (N,) MAX solid-solid overlap depth (m) + the worst geom pair, `abnormal_penetration(scene, thresh_m)` flags
+  envs over threshold, and `PenetrationTracker` folds the per-step buffer into a per-env **worst-ever** across
+  the trajectory. *The faithful solver API:* it reads the solver's persistent contact buffer directly —
+  `scene.rigid_solver.collider._collider_state.contact_data.{penetration, geom_a, geom_b}` + `n_contacts`,
+  via `qd_to_torch(..., transpose=True, copy=False)`. `penetration` is metres, **positive = overlap** (sign
+  confirmed at `collider/box_contact.py:91` + `constraint/solver.py:698`). *Why NOT `get_contacts`:*
+  `collider.get_contacts` runs a torch `gather` over `contact_sort_idx` whose dtype is not int64 in this build →
+  `RuntimeError: gather(): Expected dtype int64 for index` whenever pruning/sort is live (reproduced); the raw
+  buffer read is the documented bypass and what the project memory calls "read penetration straight from the
+  solver." *Redetect timing:* `redetect=True` runs `collider.clear()+detection()` to read the TRUE un-resolved
+  overlap (a probe), `redetect=False` reads the post-`scene.step()` buffer (the `on_step` running max). *Hollow
+  stays hollow:* the buffer only holds overlapping pairs, so a finger in the convex-decomposed bowl cavity emits
+  no deep contact — only solid-solid counts. *Threshold:* `ABNORMAL_THRESH_M = 7 mm`, chosen empirically — the
+  healthy-run per-env max sits at the firm-grasp **contact skin** (measured **1.2–2.5 mm** over 8 envs), and
+  7 mm is ~2.8× above that, far below any tunnelling (32 mm at substeps=1). *Integration* (`tasks/pickplace.py`):
+  a `PenetrationTracker` updates each `on_step`; after the run `placed = placed & ~penetrating` (a penetrating
+  demo is **not** a clean success → dropped by `success_only` export); HDF5 attrs `max_penetration_mm` (float)
+  + `penetrating` (bool) per demo; prints `[COLLECT] penetration: max=X.Xmm, abnormal=k/N`. The existing
+  through-wall metric stays (task-specific) but this detector is the **authoritative** gate. *Two-sided gate
+  (verified):* (1) healthy `pickplace.py 8 17` → **8/8 grasped, 8/8 placed, penetration max=2.5mm, abnormal=0/8**
+  (no false positive; worst pair = the real `box↔gripper` grasp contact); (2) deliberate-overlap probe
+  `scripts/temp/pen_probe.py` (two solid boxes spawned overlapping 2 cm) → detector reports **20.00 mm**, all
+  envs flagged abnormal → **PASS** (it CATCHES). See `robot_collision_cameras.md` §3g.

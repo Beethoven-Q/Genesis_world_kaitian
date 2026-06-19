@@ -32,6 +32,7 @@ from robots.ik import TOOL_IN_EE_INV, tool_R_at_home  # noqa: E402
 from skills.grasp import (world_long_axis, orientation_aware_grasp_quat, tilted_base_quat,
                           transport_quats, _R_from_wxyz, _wxyz_from_R)  # noqa: E402
 from skills.executor import BatchExecutor  # the ONE smooth motion path (densify + batch IK)  # noqa: E402
+from skills.penetration import PenetrationTracker, ABNORMAL_THRESH_M  # the #1 collision gate  # noqa: E402
 from registry.object_spec import REGISTRY  # noqa: E402
 from world.firefly_scene import OBJECTS, _rho_for  # asset root + spec->density helper  # noqa: E402
 import imageio.v3 as iio  # noqa: E402
@@ -463,8 +464,14 @@ def collect(N, seed, data_dir, out_dir):
 
     dist_trace = []                                                # per-recorded-frame distractor XY (debug only)
 
+    # ---- PENETRATION GATE (owner #1): track the WORST-ever solid-solid interpenetration across the whole
+    # trajectory (the firm grasp is usually the peak), read straight from the solver's contact buffer. Any
+    # demo whose worst penetration exceeds ABNORMAL_THRESH_M is REJECTED (not a clean success). ----
+    pen_tracker = PenetrationTracker(stage.scene, n_envs=N)
+
     def on_step(t, full, labels_t):
         record_state(full)
+        pen_tracker.update()                                       # fold this step's contact buffer into the max
         views = stage.render()
         for nm in cams:
             cam_steps[nm].append(views[nm])
@@ -497,6 +504,19 @@ def collect(N, seed, data_dir, out_dir):
     wall_pen = (((rxy > 0.065) & (rxy < 0.11) & (bottom > tabZ + 0.012) & (bottom < rim_z)) | (bottom < tabZ - 0.015))
     print(f"[COLLECT] {int((lift_cm>3).sum())}/{N} grasped, {int(placed.sum())}/{N} placed, "
           f"through-wall={int(wall_pen.sum())}/{N}  render+sim {wall:.1f}s", flush=True)
+
+    # ---- AUTHORITATIVE penetration gate (owner #1): worst-ever solid-solid interpenetration per env, read
+    # straight from the solver. A demo with abnormal interpenetration is REJECTED -- it does NOT count as a
+    # clean success (so success_only export drops it), regardless of whether the cube landed in the bowl. The
+    # through-wall metric above stays (a useful task-specific check) but THIS detector is the gate. ----
+    pen_mm = pen_tracker.depth_mm()                                # (N,) worst-ever penetration depth in mm
+    penetrating = pen_tracker.abnormal(ABNORMAL_THRESH_M)          # (N,) bool: exceeds the abnormal threshold
+    placed = placed & ~penetrating                                # an abnormally penetrating demo is NOT clean
+    worst_e = int(np.argmax(pen_mm))
+    print(f"[COLLECT] penetration: max={float(pen_mm.max()):.1f}mm "
+          f"(thresh={ABNORMAL_THRESH_M*1000:.0f}mm), abnormal={int(penetrating.sum())}/{N}"
+          + (f"  worst env{worst_e}: {pen_tracker.worst_names()[worst_e]}" if pen_mm.max() > 0 else ""),
+          flush=True)
 
     # ---- distractor collision-free metric: each distractor's XY displacement from its SETTLED pose to its
     # FINAL pose. If the arm avoided them (the corridor placement worked), this is ~0; a big value means the
@@ -545,6 +565,11 @@ def collect(N, seed, data_dir, out_dir):
             pg.create_dataset("orientation", data=eequat[e].astype(np.float32))
             d.attrs["num_samples"] = Tr; d.attrs["success"] = bool(placed[e]); d.attrs["seed"] = int(seed)
             d.attrs["arm"] = "left" if side_is_left[e] else "right"
+            # PENETRATION GATE attrs (owner #1): worst-ever solid-solid interpenetration (mm) + the abnormal
+            # flag. ``penetrating`` True means the demo is REJECTED -- ``success`` is already forced False
+            # above, so the success_only LeRobot export drops it; this poisoned data is never shipped.
+            d.attrs["max_penetration_mm"] = float(pen_mm[e])
+            d.attrs["penetrating"] = bool(penetrating[e])
             d.attrs["hdr"] = os.path.basename(stage.hdrs[e])
             d.attrs["has_distractors"] = bool(has_dist[e])     # 50/50 per-env: was this a cluttered trial?
             d.attrs["distractors"] = ",".join(dist_names) if has_dist[e] else ""
@@ -580,7 +605,8 @@ def collect(N, seed, data_dir, out_dir):
     print(f"[COLLECT] wrote {N} demos ({int(placed.sum())} placed) -> {data_dir}/demos.hdf5 + videos ; "
           f"tiles -> {out_dir} (4view demos {chosen})")
     print("COLLECT_DONE")
-    return dict(placed=int(placed.sum()), grasped=int((lift_cm > 3).sum()), through_wall=int(wall_pen.sum()))
+    return dict(placed=int(placed.sum()), grasped=int((lift_cm > 3).sum()), through_wall=int(wall_pen.sum()),
+                max_penetration_mm=float(pen_mm.max()), abnormal_penetration=int(penetrating.sum()))
 
 
 if __name__ == "__main__":

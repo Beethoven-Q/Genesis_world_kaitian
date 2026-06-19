@@ -308,6 +308,103 @@ penetration and a firm/stable grasp (carry swing 60°→0°). No kinematic attac
 
 ---
 
+## 3g. Penetration detector (the owner's #1 enforcement gate)
+
+Collision correctness being a claim is not enough — it must be **measured and enforced every demo**. A faithful,
+batched penetration monitor (`skills/penetration.py`) reads the **true** interpenetration depth straight from
+the solver and **rejects** any demo with abnormal overlap, so poisoned/unphysical data never ships. (Owner
+directive #1; see `docs/project_overview.md` §0b.)
+
+### The solver API it reads (faithful — NOT `entity.get_contacts`)
+
+Genesis's rigid solver keeps a **persistent per-env contact buffer** in
+`scene.rigid_solver.collider._collider_state.contact_data` (physical layout `(n_contacts_max, n_envs)`):
+
+| field | meaning |
+| --- | --- |
+| `contact_data.penetration` | per-contact overlap depth in **metres, positive == the two geoms interpenetrate** |
+| `contact_data.geom_a` / `geom_b` | the two global geom indices of the contacting pair |
+| `n_contacts` (shape `(n_envs,)`) | #live contacts per env; slots `>= n_contacts[e]` are stale padding |
+
+The sign convention is confirmed in the engine: `genesis/engine/solvers/rigid/collider/box_contact.py:91`
+(`penetration = sphere_radius - dist`, positive when overlapping) and
+`genesis/engine/solvers/rigid/constraint/solver.py:698` (the constraint solver consumes `-penetration` as the
+position error → MuJoCo convention, positive == deeper overlap). The detector reads these buffers **directly**
+via `qd_to_torch(..., transpose=True, copy=False)` (a zero-copy Quadrants→torch view).
+
+**Why `get_contacts` is avoided.** `collider.get_contacts(...)` runs a torch `gather` over `contact_sort_idx`
+whose dtype is not int64 in this build, so the moment contact pruning/spatial-sort is active it raises
+`RuntimeError: gather(): Expected dtype int64 for index` (verified live). `entity.get_contacts` wraps that same
+gather (it is the "buggy `get_contacts`" the project memory warns about). Reading the solver's raw contact
+buffer is the documented bypass and has none of that fragility.
+
+**Geom → identity** for the worst offending pair: `solver.geoms[g].link.name`, `.link.entity.idx`,
+`.link.is_fixed`.
+
+### Detection timing — snapshot vs redetect
+
+The contact buffer is refreshed at the **start** of every `scene.step()` (collider detection runs *before*
+constraint resolution). So:
+
+- **snapshot** (`redetect=False`, default): read the buffer as-is. Use right after a `scene.step()` (i.e. inside
+  an executor `on_step` callback) to track the **running-max** penetration across the whole trajectory — this
+  catches the worst moment (the firm grasp), not just the final resting pose.
+- **redetect** (`redetect=True`): run `collider.clear()` + `collider.detection()` first, so the buffer reflects
+  the **current geometry with no constraint resolution** — the TRUE un-resolved overlap. Use in a standalone
+  probe where geometry was placed but not stepped (a deliberate 2 cm overlap then reads **20.0 mm**, not the
+  post-step residual). The monitor never integrates the sim; it only reads (redetect rebuilds the same buffer
+  the next step would).
+
+### Hollow stays hollow (no special-casing needed)
+
+The buffer only ever holds geom pairs the narrowphase found **overlapping**, so resting contact sits at ~0 depth
+and a finger inside a **convex-DECOMPOSED bowl cavity** produces no deep contact at all — there is simply no
+solid there to overlap. Only **solid-solid** overlap is ever flagged.
+
+### The threshold + rationale
+
+`ABNORMAL_THRESH_M = 0.007` (**7 mm**), chosen **empirically**. On a healthy cube→bowl run the per-env max
+solid-solid penetration is the firm-grasp **contact skin**: measured **1.2–2.5 mm** across an 8-env run (worst
+pair `box ↔ left_gripper_right_link_1`, the expected finger-on-cube grasp contact). 7 mm sits **~2.8× above**
+that normal max — comfortably clear of the firm-grasp residual (substeps=4 gives ~1.5 mm finger-into-cube; §3c)
+yet far below any real tunnelling (a finger-through-cube was **32 mm** at substeps=1; a wall tunnel is ≫1 cm).
+
+### Interface (`skills/penetration.py`)
+
+```python
+max_penetration(scene, robot=None, ignore_pairs=None, redetect=False, self_collision=True) -> dict
+    # -> {'depth_m'(N,), 'depth_mm'(N,), 'worst_pair'[N], 'worst_pair_names'[N]}  per-env MAX solid-solid overlap
+abnormal_penetration(scene, thresh_m=ABNORMAL_THRESH_M, ...) -> (per_env_bool(N,), per_env_depth_m(N,))
+class PenetrationTracker(scene, n_envs, ...)        # running per-env worst-ever across a trajectory
+    .update()                                       # call in on_step (right after each scene.step())
+    .depth_mm() / .abnormal(thresh_m) / .worst_names()
+```
+
+`ignore_pairs` = global geom-index pairs to exclude (a known-acceptable mating contact). `self_collision=False`
+drops same-entity contacts (default keeps them — a robot link tunnelling into another link is also abnormal).
+
+### How it gates success (in `tasks/pickplace.py`)
+
+1. A `PenetrationTracker` is created before the run and `tracker.update()` is called each `on_step` → per-env
+   **worst-ever** penetration.
+2. After the run: `pen_mm = tracker.depth_mm()`; `penetrating = tracker.abnormal(ABNORMAL_THRESH_M)`.
+3. **Success is gated:** `placed = placed & ~penetrating` — a demo with abnormal interpenetration is **NOT a
+   clean success** even if the cube landed in the bowl, so the `success_only` LeRobot export drops it.
+4. **HDF5 attrs per demo:** `max_penetration_mm` (float) and `penetrating` (bool).
+5. A summary line prints: `[COLLECT] penetration: max=X.Xmm (thresh=7mm), abnormal=k/N  worst env_: linkA<->linkB`.
+
+The existing **through-wall** metric (§ the wall_pen check) stays — a useful task-specific container check — but
+**this general detector is the authoritative gate**.
+
+### Two-sided verification (a detector that never fires is worthless)
+
+- **Healthy run** (`pickplace.py 8 17`): `8/8 grasped, 8/8 placed`, `penetration: max=2.5mm, abnormal=0/8` — no
+  regression, no false positive on normal grasps.
+- **Deliberate overlap** (`scripts/temp/pen_probe.py`): two solid boxes spawned overlapping by 2 cm → the
+  detector reports **20.00 mm** and flags all envs abnormal. PASS (it CATCHES real interpenetration).
+
+---
+
 ## 4. IK bridge
 
 Two IK paths exist. **The collector uses the Genesis-native one** (`robots/ik.py`); the SODA analytic
