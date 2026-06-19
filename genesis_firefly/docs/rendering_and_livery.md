@@ -392,6 +392,37 @@ A consolidated list — each cost real iterations.
    re-attaches the wrist cams each frame, giving true egocentric views. The low-level call
    leaves them at the options default `pos=(3.5,0,1.5)`.
 
+9. **A `gs.morphs.Box` has NO UVs → Nyx can't map an image texture onto it.** Giving a textured
+   Box a `diffuse_texture` logs `Texture given but asset missing uv info (or failed to load)` and
+   renders a **garbled/smeared** fallback (the texture streaks down the side faces). → For a textured
+   flat surface use a **`gs.morphs.Plane`** (it carries UVs and the exporter UV-handles it, below),
+   or bake explicit UVs into a `gs.morphs.Mesh`. This is how the **table-texture DR** works: the
+   collidable table stays a Box (physics), a thin **visual-only Plane** on top carries the texture
+   (`world/manipulation_stage.py::_top_plane`).
+
+### Nyx `diffuse_texture` mechanism (image textures on standalone primitives)
+
+A standalone primitive/`Mesh` entity (NOT a URDF — see gotcha 4) honours its own
+`add_entity(surface=…)` in Nyx. To put an image albedo on it:
+
+```python
+surf = gs.surfaces.Plastic(
+    diffuse_texture=gs.textures.ImageTexture(image_path="/abs/path/to/albedo.png"),
+    roughness=0.65)
+```
+
+The Nyx exporter (`gs_nyx_plugin/nyx_scene_exporter.py`) reads `surface.diffuse_texture`: if it's an
+`ImageTexture` with an `image_path`, it sets that path as the material's **AlbedoTexture**
+(`_apply_texture` → `mat.albedoTexture = texture.image_path`). A `ColorTexture` / `surface.color`
+instead sets a flat `albedoColor`.
+
+**Plane UV scaling (the tiling math).** `create_plane` builds mesh UVs spanning `0..plane_size/tile_size`,
+then the exporter additionally applies `mat.uvScale = plane_size` **for a Plane with a diffuse texture**.
+Net repeats over an edge of length `L` are therefore `L² / tile_size`. To get `L/period` repeats
+(i.e. one texture every `period` metres) set **`tile_size = L · period`**, and use the **same** value
+for both U and V so texels stay **square** (`world/manipulation_stage.py::_top_plane` does exactly this,
+with `period` per texture category in `_TEX_PERIOD`).
+
 ---
 
 ## 7. How to recolour (the knobs)
@@ -408,6 +439,7 @@ regenerated.
 | The link_2/3 "Y face" strip colour | `YFACE_RGB` in `bake_soma_panels.py` | `bake_soma_panels.py` |
 | Whole-arm sheen (matte ↔ glossy) at render time — no re-bake | `ARM_SURF = dict(metallic=, roughness=)` in `manipulation_stage.py` | nothing |
 | Table colours / DR | `_pick_table` / `distinct_object_color` in `manipulation_stage.py` | nothing |
+| Table **textures** / DR | the pack in `assets/textures/tables/` (globbed by `table_texture_pool`); tiling in `_TEX_PERIOD` | `scripts/build_table_textures.py` to (re)build the pack |
 | Background rooms / brightness | the HDRI pool (`hdr_pool`, `/data3/hdr1k`) and `e.multiplier` | nothing |
 | Render quality | `SPP` env var (default `32`, denoised) | nothing |
 
@@ -430,12 +462,14 @@ CUDA_VISIBLE_DEVICES=0 ./.venv/bin/python genesis_firefly/scenes/manipulation_st
 - Per-env photoreal Nyx rendering, batched: `cam.read().rgb` → `(N,H,W,3)`, one call.
 - True egocentric wrist cams (via the sensor `read()` re-attach + `entity_idx/link_idx_local/offset_T`).
 - Per-env immersive HDRI rooms (no ground plane), 100 envs @ 1K in one build.
+- Per-build table **textures** (wood / steel / tablecloth albedo maps) on visual-only Plane tops over the collidable table Boxes (`_top_plane`); flush under the per-env object-table height DR.
 - Full SOMA livery: silver links, dark wrist/base, black gripper root, dark-green fingers, black link_4 cap, carbon + silver-strip link_2/3 panels.
 - Neutral silver in any room via the matte entity override.
 
 ### What does NOT work
 - Madrona / LuisaRender for photoreal (use Nyx).
 - `baseColorFactor`/`metallicFactor`/`roughnessFactor` on URDF meshes (ignored — bake textures + use the matte override).
+- An image texture on a `gs.morphs.Box` (no UVs — garbled/smeared; use a `Plane` or a UV'd `Mesh`).
 - Multi-material GLBs or multi-`<visual>` links for a two-colour link (use a one-material atlas).
 - A VSTACK atlas (UV v-flip — use HSTACK).
 - The textured YCB `bowl.usd` (segfault — use a clean extracted OBJ).

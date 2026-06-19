@@ -38,6 +38,14 @@ simulator with **RTX-grade Nyx** photoreal rendering, then generalizes it into t
   around them (see [domain_randomization.md](domain_randomization.md)).
 - **Full DR every trial** (scopes A/B/C, half-left/half-right arm) — never ship a "DR" run that forgot a scope
   (e.g. table texture). Keep everything organized, clean, elegant, agent-native.
+- **Every task ends with a smooth GO-HOME stage** — after the task succeeds, the arm(s) return to home gently
+  (densified, enough waypoints), RECORDED in both the data and the video. Applies to **all** tasks, single-arm
+  AND dual-arm, so the policy learns to return home when finished. (Owner directive, 2026-06-19.)
+- **Use subagents to keep the main context lean.** Delegate well-scoped mechanical/build tasks (repo reorg,
+  feature implementation, broad investigations) to focused subagents — each with a precise recipe, a **hard
+  verification gate** (compile + a real parity/render run, paste real output), and a **docs-update requirement**.
+  The main agent reviews the diff + the gate result, then commits/pushes. This conserves context and keeps every
+  change documented. (Owner directive, 2026-06-19.)
 
 ## 1. The end-to-end sim-to-real pipeline (the loop the framework automates)
 Adapted from the proven RoboLab native pi0.5 pipeline (`RoboLab/docs/hex_pi05_native_pipeline.md`) — the big

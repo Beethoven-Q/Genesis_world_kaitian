@@ -60,3 +60,23 @@ phase lands. Requirements live in [project_overview.md](project_overview.md) (bl
   the hard ~20%).
 - **2026-06-19 — go-home recording.** Append a smooth return-to-home waypoint at the end of every demo so the
   return is densified (gentle) and RECORDED (video + data) → the policy learns to return home when finished.
+- **2026-06-19 — TABLE-TEXTURE DR (scope-A item, was flagged-missing).** *Problem:* the DR spec wanted per-build
+  table textures (wood / steel / tablecloth albedo maps, ≥10 incl. bright florals), but the stage only had a
+  per-build table **colour** — flat, no material variety. *Change:* (a) a 12-map pack in
+  `assets/textures/tables/` (4 wood · 3 steel/metal · 5 tablecloth incl. red/blue gingham + red-white floral +
+  checker + polka), built by `scripts/build_table_textures.py` (3 real RoboLab albedos downsampled to 1024², the
+  rest procedural numpy/PIL); (b) `manipulation_stage.py`: `table_texture_pool()` globs the pack,
+  `__init__` picks one per build with the stage RNG → `self.table_texture`, applied to **both** tables (flush at
+  the seam → one continuous surface); (c) the collidable table **Boxes** keep physics, a thin **visual-only,
+  no-collision `gs.morphs.Plane`** on each top carries the texture as
+  `Plastic(diffuse_texture=ImageTexture(image_path=…))`. *Why a Plane, not a textured Box:* a `gs.morphs.Box`
+  has **no UVs** → Nyx warns `Texture given but asset missing uv info` and renders a **garbled smear**; a Plane
+  carries UVs and the Nyx exporter UV-handles it (verified by a side-by-side probe render). The object-table top
+  Plane is batched (`batch_fixed_verts=True`) and the task calls `stage.set_otable_top_z(tabZ)` after the per-env
+  height DR so the texture stays **flush** on the randomized table. Box edges tinted to the texture's mean colour
+  so the table edge matches the top. **Friction untouched + stays per-env, decoupled from texture.** *Result:*
+  texture VISIBLY + cleanly renders on the table top in third / side / **both wrist** cams (preview
+  `output/temp/table_texture_preview.png` = 4 distinct textures; gingham four-view confirms wrist cams). Parity:
+  `pickplace.py 8 13` → **8/8 grasped, 8/8 placed, 0 through-wall, max|dq|=0.027 rad** — collection unbroken. See
+  `rendering_and_livery.md` §8 (Box-UV gotcha + the Plane `uvScale` tiling math) +
+  `domain_randomization.md` (scope-A row now ✅).

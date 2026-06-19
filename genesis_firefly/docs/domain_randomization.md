@@ -34,11 +34,24 @@ photoreal quality, and SIZE/object-type variety (only achievable this way). HDRI
 
 | field | what | range | variability |
 |---|---|---|---|
-| **table texture** | wooden / steel / tablecloth albedo maps — NOT pure colour, NOT too fancy; **≥10** incl. several **bright tablecloths** (e.g. red-white floral) | choice over the texture pack | per-build |
+| **table texture** ✅ IMPLEMENTED | wooden / steel / tablecloth albedo maps — NOT pure colour, NOT too fancy; **≥10** incl. several **bright tablecloths** (e.g. red-white floral) | choice over the texture pack | per-build |
 | **object-table relative height** | the relative height between the **object table** and the arm table — lower/raise the **object table only** | **uniform ±5 cm** | per-env |
 | **object-table size** | current size is the **minimum**; randomly grow width and length. **Length extends ONLY away from the arm table** (the end abutting the arm table is fixed at `seam_x + depth/2`); texture rescales accordingly | width: +0..Δw, length-away: +0..Δl | per-build |
 | **side-camera height + pitch** | **side cam only** (never the wrist cams). Current height = minimum; raise up to **+5 cm**; when raised, **pitch down slightly** to keep the workspace framed | height +0..5cm, pitch = re-frame | per-build |
 | **table friction** | metal ↔ wood ↔ wool/fabric, **independent of texture** | small uniform band | per-env |
+
+> **Table-texture — how it's implemented** (`world/manipulation_stage.py`): a 12-map pack lives in
+> `assets/textures/tables/` (4 wood · 3 steel/metal · 5 tablecloth incl. red/blue gingham + red-white
+> floral; built by `scripts/build_table_textures.py`, listed in that dir's `README.md`).
+> `table_texture_pool()` globs it; `ManipulationStage.__init__` picks **one** map per build with the
+> stage RNG → `self.table_texture`, applied to **BOTH** tables (they're flush at the seam → one
+> continuous surface). The collidable table **Boxes** keep all physics/friction; a thin **visual-only,
+> no-collision `gs.morphs.Plane`** sits on each top and carries the texture as a
+> `gs.surfaces.Plastic(diffuse_texture=gs.textures.ImageTexture(image_path=…))` (a Box has no UVs so Nyx
+> can't texture it — see `rendering_and_livery.md` §8). The object-table top Plane is **batched**
+> (`batch_fixed_verts=True`) and the task calls `stage.set_otable_top_z(tabZ)` right after the per-env
+> height DR so the texture stays flush on the randomized table. **Friction is untouched and stays
+> per-env, fully decoupled from texture** (this code never sets friction).
 
 ## Scope B — Object / Task  (per-object, per-task; REALISTIC only)
 

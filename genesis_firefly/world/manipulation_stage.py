@@ -37,7 +37,8 @@ from world.firefly_cameras import (LEFT_WRIST, RIGHT_WRIST, SIDE, WRIST_VFOV, SI
 from robots.firefly_dual import FireflyDual  # noqa: E402
 
 # ---- rendering defaults -----------------------------------------------------------------------------------
-RES = (320, 180)                                              # 16:9; all 4 cameras share it
+RES = (640, 360)   # 16:9; all 4 cameras share it. Short side 360 >= pi0.5's ~224 input (no upscaling) for
+#                    crisp wrist-cam grasp detail (owner decision 2026-06-19; was 320x180 for early-bringup speed).
 SPP = int(os.environ.get("SPP", "32"))                       # Nyx samples/pixel (denoised; 32 is clean)
 # matte entity-surface override: Nyx applies this to the whole URDF (color=None -> per-mesh texture colours
 # kept), killing the warm-env mirror so the silver livery reads NEUTRAL in any room.
@@ -81,6 +82,46 @@ def valid_2k_pool():
         ok = {os.path.basename(p) for p in glob.glob(f"{HDR_1K}/*.hdr")}
     valid = [p for p in _HDRS_2K if os.path.basename(p) in ok]
     return valid or _HDRS_2K
+
+
+# ---- per-build table-TEXTURE DR (wood / steel / tablecloth albedo maps) ------------------------------------
+# DR spec (docs/domain_randomization.md, scope A): table texture is PER-BUILD (Nyx bakes albedo at build), a
+# choice over a >=10 texture pack incl. several bright tablecloths. The pack lives next to the stage and is
+# globbed (so adding/removing a PNG changes the pool with zero code change). Build it with
+# `scripts/build_table_textures.py`. The texture is the table's VISUAL only — friction stays per-env + decoupled
+# from texture (the task sets table/finger friction independently; this code never touches friction).
+_TABLE_TEX_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                              "assets", "textures", "tables")
+# Per-category physical texel period (metres per ONE full texture repeat) so a small arm table and a big object
+# table read at the SAME real-world scale (gingham squares ~2-3cm, wood plank ~1 board across). Net repeats over
+# a slab edge of length L = L / period (see rendering_and_livery.md for the Plane uvScale math).
+_TEX_PERIOD = {"cloth": 0.34, "wood": 0.55, "steel": 0.60, "metal": 0.60}
+
+
+def table_texture_pool():
+    """The sorted list of table-texture albedo PNGs (the per-build DR pool). Globbed from
+    ``assets/textures/tables`` — built by ``scripts/build_table_textures.py`` (>=10 incl. bright tablecloths)."""
+    return sorted(glob.glob(f"{_TABLE_TEX_DIR}/*.png") + glob.glob(f"{_TABLE_TEX_DIR}/*.jpg"))
+
+
+def _tex_period(path):
+    """Metres-per-repeat for a texture, keyed by the category prefix in its filename (cloth/wood/steel/metal)."""
+    name = os.path.basename(path).lower()
+    for key, period in _TEX_PERIOD.items():
+        if name.startswith(key):
+            return period
+    return 0.45                                                  # sensible default for an unlabelled texture
+
+
+def _texture_mean_rgb(path):
+    """The mean RGB (0..1) of a texture image — used to tint the table-Box EDGES so they match the textured
+    top instead of clashing. Cheap (downsamples to 64px); failures fall back to neutral grey."""
+    try:
+        from PIL import Image
+        im = Image.open(path).convert("RGB").resize((64, 64))
+        return tuple((np.asarray(im, np.float32).reshape(-1, 3).mean(0) / 255.0).tolist())
+    except Exception:
+        return (0.5, 0.5, 0.5)
 
 
 # ---- table-colour DR (the environment visual DR the stage owns) -------------------------------------------
@@ -128,19 +169,35 @@ class ManipulationStage:
         self.table_color, self._tab_hsv = self._pick_table()
         self.atable_color = tuple(0.7 * c for c in self.table_color)
 
+        # PER-BUILD table TEXTURE: one albedo map (wood / steel / tablecloth) baked onto the table TOPS this
+        # build. BOTH tables share the SAME texture (they are flush at the seam -> one continuous surface reads
+        # realistic). The collidable Boxes keep physics; a thin visual-only textured Plane on top maps the
+        # texture (a Box has no UVs -> Nyx can't map a texture onto it; a Plane does, see render notes). Falls
+        # back to plain colour if the pack is missing.
+        pool = table_texture_pool()
+        self.table_texture = pool[int(self.rng.randint(len(pool)))] if pool else None
+        # side colour for the collidable Box: the texture's MEAN tone (so the table EDGE matches the textured
+        # top instead of a clashing bright colour); plain colour-DR is the fallback when no texture is loaded.
+        side = _texture_mean_rgb(self.table_texture) if self.table_texture else self.table_color
+        self.aside_color = tuple(0.85 * c for c in side)         # arm table edge slightly darker
+
         # --- scene: NO ground plane -> the HDRI room is the immersive floor+walls; tables are the surfaces ---
         ha, ho = self.lay.arm_table_height, self.lay.object_table_height
         self.scene = gs.Scene(sim_options=gs.options.SimOptions(dt=0.01, substeps=4),
                               rigid_options=firm_rigid_options(), show_viewer=False)
         self.robot = FireflyDual(self.scene, pos=(0, 0, ha), surface=gs.surfaces.Default(**ARM_SURF))
+        # collidable bodies (mean-tone edges; the textured top Plane covers what the cameras mostly see)
         self.atable = self.scene.add_entity(
             gs.morphs.Box(size=(self.lay.arm_table_depth, self.lay.common_width, ha),
                           pos=(self.lay.seam_x - self.lay.arm_table_depth / 2, 0, ha / 2), fixed=True, collision=True),
-            surface=gs.surfaces.Plastic(color=self.atable_color, roughness=0.5))
+            surface=gs.surfaces.Plastic(color=self.aside_color, roughness=0.6))
         self.otable = self.scene.add_entity(
             gs.morphs.Box(size=(self.lay.object_table_depth, self.lay.common_width, ho),
                           pos=(self.lay.seam_x + self.lay.object_table_depth / 2, 0, ho / 2), fixed=True, collision=True),
-            surface=gs.surfaces.Plastic(color=self.table_color, roughness=0.55))
+            surface=gs.surfaces.Plastic(color=side, roughness=0.6))
+        # textured tops (visual only, no collision). atable is static; otable is moved per-env by the task's
+        # height DR -> its top Plane must track it (batch_fixed_verts=True) and the task calls set_otable_top_z.
+        self.atable_top, self.otable_top = self._add_table_tops(ha, ho)
         add_side_camera_rig(self.scene)                      # visible D435i body + support stick
 
         eidx = self.robot.entity.idx
@@ -165,6 +222,45 @@ class ManipulationStage:
             if hasattr(lk, a):
                 return int(getattr(lk, a))
         return int(lk.idx - self.robot.entity.link_start)
+
+    def _table_top_surface(self):
+        """The surface for a textured table top: the per-build albedo map as a diffuse_texture (matte), or a
+        plain coloured fallback when the texture pack is missing. Each call makes its OWN texture instance so
+        the two tables don't share a mutable surface object."""
+        if not self.table_texture:
+            return gs.surfaces.Plastic(color=self.table_color, roughness=0.6)
+        return gs.surfaces.Plastic(diffuse_texture=gs.textures.ImageTexture(image_path=self.table_texture),
+                                   roughness=0.65)
+
+    def _top_plane(self, depth, width, cx, top_z, batch_fixed):
+        """A thin VISUAL-ONLY (no collision) textured Plane covering one table top. `tile_size` is set from the
+        texture's physical period so a small arm table and a big object table read at the same real-world scale;
+        an isotropic tile (`p,p`) keeps texels square. Sits 0.2mm above the collidable Box top."""
+        period = _tex_period(self.table_texture) if self.table_texture else 0.45
+        ts = depth * period                                      # net repeats over `depth` = depth/period
+        return self.scene.add_entity(
+            gs.morphs.Plane(pos=(cx, 0.0, top_z + 2e-4), normal=(0, 0, 1), plane_size=(depth, width),
+                            tile_size=(ts, ts), visualization=True, collision=False, fixed=True,
+                            batch_fixed_verts=batch_fixed),
+            surface=self._table_top_surface())
+
+    def _add_table_tops(self, ha, ho):
+        """Textured top Planes for both tables. The arm table is static; the object table is moved per-env by
+        the task's height DR, so its top Plane is batched (set_otable_top_z re-glues it after each set_pos)."""
+        atop = self._top_plane(self.lay.arm_table_depth, self.lay.common_width,
+                               self.lay.seam_x - self.lay.arm_table_depth / 2, ha, batch_fixed=False)
+        otop = self._top_plane(self.lay.object_table_depth, self.lay.common_width,
+                               self.lay.seam_x + self.lay.object_table_depth / 2, ho, batch_fixed=True)
+        return atop, otop
+
+    def set_otable_top_z(self, top_z):
+        """Glue the object-table TOP plane to the per-env object-table height. Call right after the task moves
+        the object-table Box (``otable.set_pos(... z=tabZ-ho/2)``); `top_z` is the per-env table-TOP height
+        (``tabZ``), shape (N,). Keeps the texture flush on the randomized table (no float/sink)."""
+        top_z = np_(top_z).reshape(-1).astype(np.float32)
+        cx = self.lay.seam_x + self.lay.object_table_depth / 2
+        pos = np.stack([np.full_like(top_z, cx), np.zeros_like(top_z), top_z + 2e-4], 1).astype(np.float32)
+        self.otable_top.set_pos(pos)
 
     def _pick_table(self):
         rng = self.rng
@@ -216,8 +312,11 @@ class ManipulationStage:
 if __name__ == "__main__":
     import imageio.v3 as iio
     gs.init(backend=gs.gpu)
-    st = ManipulationStage(n_envs=2, seed=1)
+    seed = int(sys.argv[1]) if len(sys.argv) > 1 else 1
+    st = ManipulationStage(n_envs=2, seed=seed)
     st.build(); st.settle_home(50)
     v = st.render()
     iio.imwrite("/tmp/stage_selfcheck.png", v["third"][0])
-    print("STAGE_OK third", v["third"].shape, "rooms:", [os.path.basename(h) for h in st.hdrs])
+    print("STAGE_OK third", v["third"].shape,
+          "table_texture:", os.path.basename(st.table_texture) if st.table_texture else None,
+          "rooms:", [os.path.basename(h) for h in st.hdrs])

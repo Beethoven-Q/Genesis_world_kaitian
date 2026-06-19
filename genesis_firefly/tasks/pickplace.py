@@ -112,6 +112,7 @@ def collect(N, seed, data_dir, out_dir):
     side_is_left, yaw = dr["side_is_left"], dr["yaw"]
     qz = np.stack([np.cos(yaw / 2), 0 * yaw, 0 * yaw, np.sin(yaw / 2)], 1).astype(np.float32)
     stage.otable.set_pos(np.stack([np.full(N, lay.seam_x + lay.object_table_depth / 2), np.zeros(N), tabZ - ho / 2], 1).astype(np.float32))
+    stage.set_otable_top_z(tabZ)                                # keep the textured table-top flush with the height DR
     bowl.set_pos(np.stack([bowx, bowy, tabZ + BOWL_HALF_H + 0.003], 1).astype(np.float32))
     cube_top = tabZ + spec.scaled_extents()[2] / 2 + 0.002
     cube.set_pos(np.stack([cubx, cuby, cube_top + 0.01], 1).astype(np.float32)); cube.set_quat(qz)
