@@ -1,3 +1,4 @@
+<?xml version="1.0"?>
 <robot name="dual_firefly_y6_gr100">
   <link name="dual_base">
     <inertial>
@@ -15,7 +16,7 @@
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0" />
       <geometry>
-        <mesh filename="source/xpkg_urdf_firefly_y6/meshes/base_link.STL" />
+        <mesh filename="livery/base_link__dark.glb" />
       </geometry>
       <material name="mat_left_base_link">
         <color rgba="0.30 0.30 0.33 1" />
@@ -37,7 +38,7 @@
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0" />
       <geometry>
-        <mesh filename="source/xpkg_urdf_firefly_y6/meshes/link_1.STL" />
+        <mesh filename="livery/link_1__silver.glb" />
       </geometry>
       <material name="mat_left_link_1">
         <color rgba="0.72 0.73 0.76 1" />
@@ -106,7 +107,7 @@
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0" />
       <geometry>
-        <mesh filename="source/xpkg_urdf_firefly_y6/meshes/link_4.STL" />
+        <mesh filename="livery/link_4__black.glb" />
       </geometry>
       <material name="mat_left_link_4">
         <color rgba="0.60 0.61 0.63 1" />
@@ -135,7 +136,7 @@
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0" />
       <geometry>
-        <mesh filename="source/xpkg_urdf_firefly_y6/meshes/link_5.STL" />
+        <mesh filename="livery/link_5__silver.glb" />
       </geometry>
       <material name="mat_left_link_5">
         <color rgba="0.72 0.73 0.76 1" />
@@ -164,7 +165,7 @@
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0" />
       <geometry>
-        <mesh filename="source/xpkg_urdf_firefly_y6/meshes/link_6.STL" />
+        <mesh filename="livery/link_6__dark.glb" />
       </geometry>
       <material name="mat_left_link_6">
         <color rgba="0.12 0.12 0.13 1" />
@@ -193,7 +194,7 @@
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0" />
       <geometry>
-        <mesh filename="source/xpkg_urdf_gr100/meshes/base_link.STL" />
+        <mesh filename="livery/base_link__black.glb" />
       </geometry>
       <material name="mat_left_gripper_base_link">
         <color rgba="0.74 0.75 0.78 1" />
@@ -220,7 +221,7 @@
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0" />
       <geometry>
-        <mesh filename="source/xpkg_urdf_gr100/meshes/L1.STL" />
+        <mesh filename="livery/L1__green.glb" />
       </geometry>
       <material name="mat_left_gripper_left_link_1">
         <color rgba="0.74 0.75 0.78 1" />
@@ -249,7 +250,7 @@
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0" />
       <geometry>
-        <mesh filename="source/xpkg_urdf_gr100/meshes/L2.STL" />
+        <mesh filename="livery/L2__green.glb" />
       </geometry>
       <material name="mat_left_gripper_right_link_1">
         <color rgba="0.74 0.75 0.78 1" />
@@ -295,7 +296,7 @@
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0" />
       <geometry>
-        <mesh filename="source/xpkg_urdf_firefly_y6/meshes/base_link.STL" />
+        <mesh filename="livery/base_link__dark.glb" />
       </geometry>
       <material name="mat_right_base_link">
         <color rgba="0.30 0.30 0.33 1" />
@@ -317,7 +318,7 @@
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0" />
       <geometry>
-        <mesh filename="source/xpkg_urdf_firefly_y6/meshes/link_1.STL" />
+        <mesh filename="livery/link_1__silver.glb" />
       </geometry>
       <material name="mat_right_link_1">
         <color rgba="0.72 0.73 0.76 1" />
@@ -386,7 +387,7 @@
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0" />
       <geometry>
-        <mesh filename="source/xpkg_urdf_firefly_y6/meshes/link_4.STL" />
+        <mesh filename="livery/link_4__black.glb" />
       </geometry>
       <material name="mat_right_link_4">
         <color rgba="0.60 0.61 0.63 1" />
@@ -415,7 +416,7 @@
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0" />
       <geometry>
-        <mesh filename="source/xpkg_urdf_firefly_y6/meshes/link_5.STL" />
+        <mesh filename="livery/link_5__silver.glb" />
       </geometry>
       <material name="mat_right_link_5">
         <color rgba="0.72 0.73 0.76 1" />
@@ -444,7 +445,7 @@
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0" />
       <geometry>
-        <mesh filename="source/xpkg_urdf_firefly_y6/meshes/link_6.STL" />
+        <mesh filename="livery/link_6__dark.glb" />
       </geometry>
       <material name="mat_right_link_6">
         <color rgba="0.12 0.12 0.13 1" />
@@ -473,7 +474,7 @@
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0" />
       <geometry>
-        <mesh filename="source/xpkg_urdf_gr100/meshes/base_link.STL" />
+        <mesh filename="livery/base_link__black.glb" />
       </geometry>
       <material name="mat_right_gripper_base_link">
         <color rgba="0.74 0.75 0.78 1" />
@@ -500,7 +501,7 @@
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0" />
       <geometry>
-        <mesh filename="source/xpkg_urdf_gr100/meshes/L1.STL" />
+        <mesh filename="livery/L1__green.glb" />
       </geometry>
       <material name="mat_right_gripper_left_link_1">
         <color rgba="0.74 0.75 0.78 1" />
@@ -529,7 +530,7 @@
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0" />
       <geometry>
-        <mesh filename="source/xpkg_urdf_gr100/meshes/L2.STL" />
+        <mesh filename="livery/L2__green.glb" />
       </geometry>
       <material name="mat_right_gripper_right_link_1">
         <color rgba="0.74 0.75 0.78 1" />
@@ -575,7 +576,7 @@
     <visual>
       <origin xyz="0.0038 -0.009 0" rpy="1.5707963 0 1.5707963" />
       <geometry>
-        <mesh filename="source/firefly_y6/d405.stl" scale="0.001 0.001 0.001" />
+        <mesh filename="livery/d405__camg.glb" scale="0.001 0.001 0.001" />
       </geometry>
       <material name="mat_left_camera_body">
         <color rgba="0.667 0.698 0.769 1" />
@@ -602,7 +603,7 @@
     <visual>
       <origin xyz="0.0038 -0.009 0" rpy="1.5707963 0 1.5707963" />
       <geometry>
-        <mesh filename="source/firefly_y6/d405.stl" scale="0.001 0.001 0.001" />
+        <mesh filename="livery/d405__camg.glb" scale="0.001 0.001 0.001" />
       </geometry>
       <material name="mat_right_camera_body">
         <color rgba="0.667 0.698 0.769 1" />

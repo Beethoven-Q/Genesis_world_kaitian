@@ -14,8 +14,38 @@ Exposes the SAME ``solve(ee_pos, ee_quat, q_init) -> IKSolution`` interface the 
 from __future__ import annotations
 
 from dataclasses import dataclass
+import sys
+from pathlib import Path
 
 import numpy as np
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "_core_vendored"))
+from skills.grasp import _R_from_wxyz, _wxyz_from_R  # noqa: E402
+
+# --- Gripper TOOL frame relative to ee_link (MEASURED in Genesis, grasp_calib.py) ----------------------- #
+# Genesis's *_ee_link is ~11cm BEHIND the claws (NOT RoboLab/Isaac's 8mm TCP-style ee_link). The tool frame
+# puts the origin AT the claw-convergence point, +Z = approach (toward the object), +X = closing (claw
+# separation), so the reusable skills (which assume +Z approach / +X closing at the grasp point) work
+# unchanged. Identical for both arms (symmetric gripper). The IK adapter targets this TOOL frame and
+# converts to the ee_link pose internally before calling Genesis IK.
+# tool origin = the GRIP POINT where the CLOSED fingertips meet (grip_tool.py at q=GR100_MEET), NOT the
+# hinge midpoint — the curved GR100 fingers fold back so the grip point is only ~2.8cm from ee (close to
+# RoboLab's [0,0,0.008]). Aiming the hinge at the object drove the 12.8cm fingers into the table; the grip
+# point puts the actual pinch region on the object.
+_OFF = np.array([0.0, -0.00626, 0.02731])        # grip point in the ee frame (tool origin)
+_Z = np.array([0.0, -0.0292, 0.99957])           # +Z = approach (gripper_base->grip point, ~ee +Z)
+_Z = _Z / np.linalg.norm(_Z)
+_X = np.array([-1.0, 0.0, 0.0])                  # +X = closing (claw separation)
+_Y = np.cross(_Z, _X); _Y /= np.linalg.norm(_Y)
+_X = np.cross(_Y, _Z)                            # re-orthonormalize
+TOOL_IN_EE = np.eye(4)
+TOOL_IN_EE[:3, 0], TOOL_IN_EE[:3, 1], TOOL_IN_EE[:3, 2], TOOL_IN_EE[:3, 3] = _X, _Y, _Z, _OFF
+TOOL_IN_EE_INV = np.linalg.inv(TOOL_IN_EE)
+
+
+def tool_R_at_home(home_ee_R):
+    """Tool-frame orientation given the ee_link orientation (for the skill's reference_R)."""
+    return home_ee_R @ TOOL_IN_EE[:3, :3]
 
 
 @dataclass
@@ -39,8 +69,16 @@ class GenesisArmIK:
         self.dofs = robot.arm[side]
         self.pos_tol, self.rot_tol, self.max_iters = pos_tol, rot_tol, max_iters
 
-    def solve(self, ee_pos, ee_quat=None, q_init=None) -> IKSolution:
-        """Arm joints so ee_link reaches ``ee_pos`` (+ optional ee_quat, wxyz). q_init is the arm-dof seed."""
+    def solve(self, tool_pos, tool_quat=None, q_init=None) -> IKSolution:
+        """Arm joints so the TOOL frame (claw convergence) reaches ``tool_pos`` (+ optional tool_quat, wxyz).
+        Converts the tool pose -> ee_link pose (T_ee = T_tool @ TOOL_IN_EE^-1), then solves Genesis IK for
+        ee_link. q_init is the arm-dof seed (warm start)."""
+        if tool_quat is not None:
+            T_tool = np.eye(4); T_tool[:3, :3] = _R_from_wxyz(tool_quat); T_tool[:3, 3] = np.asarray(tool_pos, float)
+            T_ee = T_tool @ TOOL_IN_EE_INV
+            ee_pos, ee_quat = T_ee[:3, 3], _wxyz_from_R(T_ee[:3, :3])
+        else:
+            ee_pos, ee_quat = np.asarray(tool_pos, float), None
         init = None
         if q_init is not None:
             init = self.robot.entity.get_dofs_position().clone() if hasattr(

@@ -91,9 +91,10 @@ def plan_pick_place(grasp_center, bowl_pos, ref_axis_world, ik_solve, q_init, *,
     Chooses the GRASP orientation (prefer top-down, relax minimal tilt) and the CARRY/PLACE orientation
     (prefer top-down transport, relax minimal tilt), then builds the waypoints. ``ref_axis_world`` is the
     object's reference axis (long axis for elongated / a face normal for a cube / None for round).
-    ``ik_solve(ee_pos, ee_quat, q_init) -> sol`` decouples this from any IK backend. If the carry
-    orientation ends up different from the grasp orientation, the wrist is REORIENTED IN PLACE at the lift
-    before translating (doing both at once let the IK -- seeded from the lift config -- stall short)."""
+    ``ik_solve(ee_pos, ee_quat, q_init) -> sol`` decouples this from any IK backend. If the carry orientation
+    differs from the grasp orientation, the wrist reorients DURING THE LIFT (the lift waypoint is retargeted to
+    the carry orientation) so the roll happens while the arm raises -- a vertical lift is well-conditioned, so
+    the IK doesn't stall, and there is NO stationary in-place reorient pause (smooth, jitter-free motion)."""
     grasp_center = np.asarray(grasp_center, float)
     bowl_pos = np.asarray(bowl_pos, float)
     gq, gtilt = reachable_grasp_quat(ik_solve, grasp_center, ref_axis_world, q_init,
@@ -104,10 +105,13 @@ def plan_pick_place(grasp_center, bowl_pos, ref_axis_world, ik_solve, q_init, *,
                                      grasp_offset_ee=grasp_offset_ee, tilt_steps_deg=tilt_steps_deg)
     pick = grasp_waypoints(grasp_center, open_g, close_g, quat=gq, grasp_offset_ee=grasp_offset_ee,
                            grasp_dz=grasp_dz, approach_h=approach_h, lift_h=lift_h)
+    if not np.allclose(cq, gq):
+        # retarget the LIFT waypoint to the carry orientation -> the wrist reorients smoothly DURING the raise
+        # (no stationary in-place reorient pause). pick[-1] = ('lift', pos, quat, grip).
+        lbl, lpos, _, lg = pick[-1]
+        pick[-1] = (lbl, lpos, cq, lg)
     place = place_waypoints(bowl_pos, open_g, close_g, quat=cq, grasp_offset_ee=grasp_offset_ee,
                             approach_h=place_approach_h, release_dz=release_dz, release_g=release_g)
-    if not np.allclose(cq, gq):
-        place = [("reorient", pick[-1][1], cq, close_g)] + place
     return PickPlacePlan(gq, cq, gtilt, ptilt, pick, place)
 
 

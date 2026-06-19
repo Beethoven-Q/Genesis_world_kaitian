@@ -43,7 +43,9 @@ def firm_rigid_options(dt=0.01):
     + noslip (reproduces RoboLab's PhysX 64/4 + rest_offset firm-contact recipe)."""
     return gs.options.RigidOptions(
         dt=dt, constraint_solver=gs.constraint_solver.Newton, iterations=120,
-        constraint_timeconst=0.005, enable_self_collision=True, enable_collision=True)
+        constraint_timeconst=0.005, enable_self_collision=True, enable_collision=True,
+        integrator=gs.integrator.implicitfast)   # exact MuJoCo/Isaac implicit PD (the approximate default
+    #                                              under-damps J5/J6 -> wrist jitter). Faithful to RoboLab.
 
 
 def add_tables(scene, layout: TableLayout):
@@ -90,11 +92,19 @@ def build_object(scene, spec, pos_xy, table_top_z, mass=None):
     return scene.add_entity(morph, material=mat, surface=surf)
 
 
-def build_bowl(scene, bowl_xy, table_top_z, scale=1.0):
+def build_bowl(scene, bowl_xy, table_top_z, scale=1.0, surface=None):
     z = table_top_z + BOWL_HALF_H * scale + 0.003
+    kw = {"surface": surface} if surface is not None else {}
+    # REALISTIC SOLID collision model = convex DECOMPOSITION (coacd) -- the SAME approach RoboLab/PhysX uses
+    # (baked convexDecomposition). The thin concave bowl shell is split into a set of SOLID convex hulls
+    # tiling the wall+floor; convex-vs-convex contact is robust EVERYWHERE, including the thin rim, so a cube
+    # that lands on the rim rolls off/in and can NEVER pass through the wall. (The single nonconvex-SDF
+    # envelope gives a degenerate ~0 contact where a corner straddles the 2-3mm rim -> tunnelling.) The cavity
+    # stays open (cube settles inside); coacd raises the rest height a few mm, which RoboLab also accepts.
     return scene.add_entity(
-        gs.morphs.USD(file=str(BOWL_USD), pos=(bowl_xy[0], bowl_xy[1], z), scale=scale, convexify=False),
-        material=gs.materials.Rigid(rho=400.0, friction=1.0))
+        gs.morphs.USD(file=str(BOWL_USD), pos=(bowl_xy[0], bowl_xy[1], z), scale=scale,
+                      convexify=True, decompose_object_error_threshold=0.04, decimate=False),
+        material=gs.materials.Rigid(rho=400.0, friction=1.0), **kw)
 
 
 class PickPlaceWorld:
@@ -104,7 +114,10 @@ class PickPlaceWorld:
                  layout: TableLayout | None = None, mass=None, with_cameras=True):
         self.spec = REGISTRY[object_name]
         self.layout = layout or TableLayout()
-        self.scene = gs.Scene(sim_options=gs.options.SimOptions(dt=0.01),
+        # substeps=4: the solver runs at dt/4 so contacts resolve HARD -> the firm grip can't sink the fingers
+        # into a solid object (measured: substeps=1 let a finger penetrate 32mm; substeps=4 -> ~1.5mm). This is
+        # the real fix for the GR100<->object penetration, NOT lowering the grip force.
+        self.scene = gs.Scene(sim_options=gs.options.SimOptions(dt=0.01, substeps=4),
                               rigid_options=firm_rigid_options(), show_viewer=False)
         self.scene.add_entity(gs.morphs.Plane())
         self.robot = FireflyDual(self.scene, pos=(0, 0, self.layout.arm_table_height))

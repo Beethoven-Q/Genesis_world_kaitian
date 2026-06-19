@@ -381,3 +381,28 @@ Every gate produces a render (or video reel) AND a number, logged under `output/
    this plan into `genesis_firefly/docs/`.
 3. Begin B0 (copy core + assets into `genesis_firefly/`), then B1.
 Line A continues independently (A1–A5) whenever a GPU is free — one sim process per GPU.
+
+---
+
+## LINE C (BONUS, added 2026-06-18) — AERO dexterous-hand branch
+Owner add-on. AFTER the gripper Genesis line is done (safety: keep as a SEPARATE branch, don't disturb the
+working gripper pipeline). Goal: make the SAME agentic design->solve->collect pipeline compatible with a
+DEXTEROUS HAND so the agent can solve tasks with fingers, not just a parallel gripper.
+- Hand: **AERO open hand** (https://tetheria.github.io/aero-hand-open/) — fetch its URDF/MJCF + meshes.
+- Architecture (agent-native, reuse): swap ONLY the end-effector. Reuse the firefly arm, Genesis-native arm
+  IK (ee_link target), cameras, livery, two-table scene, collectors, HDF5 schema + LeRobot exporter, DR.
+  New: a hand model + a hand-control abstraction (joint targets / grasp synergies / a small set of named
+  pregrasps), and hand-aware grasp planning in the skills (replace the 1-DOF gripper close with a finger
+  closure policy). Keep the `EndEffector` interface generic so gripper and hand are interchangeable.
+- MILESTONE = pick-and-place WITH THE HAND, identical deliverables (full-DR 2x2 4-cam videos + training
+  data, 5 objects, 10 trials = 5 left + 5 right).
+- STRETCH SUPER-GOAL: two-arm **throw-and-catch a tennis ball** back and forth (design->solve->collect a
+  dataset). Needs dynamic release/catch timing + a ballistic/predictive catch controller — a great showcase
+  of the agentic pipeline on a dynamic bimanual task.
+- Plan it as its own branch off the Genesis line once Lines B (gripper) is verified.
+
+**Line C refinement (2026-06-18):** AUTO-TRIGGER — once gripper pick-place is verified with good success
+(all deliverables met), proceed to the AERO hands WITHOUT waiting for owner verification. Substitute BOTH
+grippers with a PAIR of AERO hands on the dual arm. Deliverables: (1) pick-and-place with hands (same as
+gripper), (2) two-arm THROW-AND-CATCH a tennis ball in a PARABOLIC air trajectory (only possible with hands).
+Behind a generic `EndEffector` interface (gripper | hand interchangeable). Document every step for traceability.

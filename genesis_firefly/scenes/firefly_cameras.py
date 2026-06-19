@@ -10,8 +10,14 @@ calibrated rot_opengl quats (wxyz) transfer directly. Render keys: cam_lw, cam_r
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import genesis as gs
+
+# Intel RealSense D435i body mesh (the real device), used for the visible side-camera body.
+CAMERA_BODY_MESH = str(Path(__file__).resolve().parents[1]
+                       / "assets/robots/firefly_y6_gr100/source/firefly_y6/camera_link.STL")
 
 # --- intrinsics -> Genesis vertical FOV (deg). focal 24, apertures from the calibrated D405/D435i. ---
 _FOCAL = 24.0
@@ -26,11 +32,12 @@ RIGHT_WRIST = (np.array([-0.0775236, 0.0049461, 0.0478084]),
                np.array([0.1369354, 0.7101610, -0.6780283, -0.1311402]))
 SIDE = (np.array([0.0450464, 0.0325720, 0.8155021]),
         np.array([0.6637329, 0.1897607, -0.1917309, -0.6976309]))
-# visible side rig — the camera MODEL sits at the camera's OPTICAL extrinsics (same eye the render uses),
-# and the STICK rises from the ground to that exact xy to HOLD it (owner-confirmed: model pose == extrinsics).
-SIDE_BODY_POS = SIDE[0].copy()        # = optical position (NOT the device-centre offset)
-SIDE_BODY_QUAT = SIDE[1].copy()       # = camera rot_opengl (lens faces where the camera looks)
-SIDE_STICK_R, SIDE_STICK_H = 0.008, float(SIDE[0][2])   # ground -> camera
+# visible side rig — EXACT RoboLab values (firefly_cameras.py SIDE_CAM_BODY/SIDE_CAM_STICK): the real D435i
+# body MESH sits at the calibrated device-centre pose (optical + 0.0325m along the baseline) with the mesh
+# orientation RoboLab calibrated; the STICK rises from the floor to that xy to hold it up.
+SIDE_BODY_POS = np.array([0.0435222, 0.0001094, 0.8151689])
+SIDE_BODY_QUAT = np.array([0.0659103, -0.3983885, -0.6888077, -0.6020684])   # mesh rot (wxyz), calibrated
+SIDE_STICK_R, SIDE_STICK_H = 0.008, 0.8151689           # ground -> camera (r=8mm)
 
 
 def _R(q):
@@ -70,17 +77,17 @@ def update_wrist_cams(cams):
     cams["cam_rw"].move_to_attach()
 
 
-def add_side_camera_rig(scene):
-    """The visible, collidable, world-fixed side-camera BODY + support STICK (reproduces the real rig)."""
-    # D435i body: 90mm baseline along the camera's RIGHT (local X), 25mm tall, 25mm deep — oriented by the
-    # camera rot so the lens faces where the camera looks, centred ON the optical pose.
+def add_side_camera_rig(scene, body_surface=None, stick_surface=None):
+    """The visible, collidable, world-fixed side-camera BODY (real D435i mesh) + support STICK — faithful to
+    RoboLab's SIDE_CAM_BODY / SIDE_CAM_STICK. The mesh entity honours its own surface in Nyx (per-vgeom), so
+    the body renders dark like a real RealSense; the stick is a thin dark pole from the floor to the camera."""
     body = scene.add_entity(
-        gs.morphs.Box(size=(0.090, 0.025, 0.025), pos=tuple(SIDE_BODY_POS), quat=tuple(SIDE_BODY_QUAT),
-                      fixed=True, collision=True),
-        surface=gs.surfaces.Plastic(color=(0.10, 0.10, 0.11), roughness=0.5))
+        gs.morphs.Mesh(file=CAMERA_BODY_MESH, pos=tuple(SIDE_BODY_POS), quat=tuple(SIDE_BODY_QUAT),
+                       fixed=True, collision=True, convexify=True),
+        surface=body_surface or gs.surfaces.Plastic(color=(0.13, 0.13, 0.14), roughness=0.5))
     stick = scene.add_entity(
         gs.morphs.Cylinder(radius=SIDE_STICK_R, height=SIDE_STICK_H,
                            pos=(float(SIDE_BODY_POS[0]), float(SIDE_BODY_POS[1]), SIDE_STICK_H / 2),
                            fixed=True, collision=True),
-        surface=gs.surfaces.Plastic(color=(0.25, 0.25, 0.28), roughness=0.6))
+        surface=stick_surface or gs.surfaces.Plastic(color=(0.25, 0.25, 0.28), roughness=0.6))
     return body, stick
