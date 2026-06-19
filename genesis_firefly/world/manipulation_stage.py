@@ -31,8 +31,8 @@ import numpy as np
 import genesis as gs
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))   # genesis_firefly/
-from scenes.firefly_scene import TableLayout, firm_rigid_options  # noqa: E402
-from scenes.firefly_cameras import (LEFT_WRIST, RIGHT_WRIST, SIDE, WRIST_VFOV, SIDE_VFOV, _T,
+from world.firefly_scene import TableLayout, firm_rigid_options  # noqa: E402
+from world.firefly_cameras import (LEFT_WRIST, RIGHT_WRIST, SIDE, WRIST_VFOV, SIDE_VFOV, _T,
                                     add_side_camera_rig)  # noqa: E402
 from robots.firefly_dual import FireflyDual  # noqa: E402
 

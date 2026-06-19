@@ -19,7 +19,7 @@ from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "_core_vendored"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from skills.grasp import _R_from_wxyz, _wxyz_from_R  # noqa: E402
 
 # --- Gripper TOOL frame relative to ee_link (MEASURED in Genesis, grasp_calib.py) ----------------------- #

@@ -220,7 +220,7 @@ dr/           spec.py · scopes.py · object_dr.py · sampler.py · apply.py · 
 skills/       grasp.py · pick_place.py · trajectory.py · executor.py · virtual_ee.py · penetration.py
 registry/     object_spec.py(+keypoints) · tasks.py(TaskSpec)
 tasks/        _base.py · pickplace.py (reference) · (future: mug_hang.py, pour.py)                   (THIN tasks)
-io/           hdf5_writer.py · lerobot_exporter.py
+dataio/                hdf5_writer.py · lerobot_exporter.py
 runner/       collect.py (one build) · orchestrate.py (B subprocess builds → merge shards)
 assets/       robots/ · objects/ · textures/ (≥10 table textures) · backgrounds (HDRI pool)
 docs/         project_overview.md (this) · domain_randomization.md · agents.md · manipulation_stage.md · …

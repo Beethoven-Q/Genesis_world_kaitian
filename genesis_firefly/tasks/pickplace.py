@@ -13,7 +13,7 @@ The whole robot + cameras + photoreal rendering + per-env immersive HDRI backgro
 
 All N trials run in ONE fully-parallel build (stage.build()), each in its own random real room.
 
-  CUDA_VISIBLE_DEVICES=0 ./.venv/bin/python genesis_firefly/collectors/pickplace_collector.py <N> [seed]
+  CUDA_VISIBLE_DEVICES=0 ./.venv/bin/python genesis_firefly/tasks/pickplace.py <N> [seed]
   DATA_DIR (/data3/genesis_fulldr), OUT_DIR (output/temp/fulldr_collect), SPP (32).
 """
 import math
@@ -25,15 +25,14 @@ import genesis as gs
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(_HERE))                      # genesis_firefly/
-sys.path.insert(0, os.path.join(os.path.dirname(_HERE), "_core_vendored"))
-from scenes.manipulation_stage import ManipulationStage, np_   # the reusable setup  # noqa: E402
-from scenes.firefly_scene import BOWL_HALF_H  # noqa: E402
+from world.manipulation_stage import ManipulationStage, np_   # the reusable setup  # noqa: E402
+from world.firefly_scene import BOWL_HALF_H  # noqa: E402
 from robots.firefly_dual import GR100_OPEN, GR100_CLOSE, GR100_MIMIC  # noqa: E402
 from robots.ik import TOOL_IN_EE_INV, tool_R_at_home  # noqa: E402
 from skills.grasp import (world_long_axis, orientation_aware_grasp_quat, tilted_base_quat,
                           transport_quats, _R_from_wxyz, _wxyz_from_R)  # noqa: E402
 from skills.executor import BatchExecutor  # the ONE smooth motion path (densify + batch IK)  # noqa: E402
-from object_spec import REGISTRY  # noqa: E402
+from registry.object_spec import REGISTRY  # noqa: E402
 import imageio.v3 as iio  # noqa: E402
 import cv2  # noqa: E402
 import h5py  # noqa: E402

@@ -20,14 +20,14 @@ TASK  (collectors/pickplace_collector.py)            ← thin: objects + physics
 
 ## Quick start
 ```bash
-# 100 fully-parallel cube→bowl demos, full DR, photoreal, one build (~5 min on an RTX A6000)
-CUDA_VISIBLE_DEVICES=0 ./.venv/bin/python genesis_firefly/collectors/pickplace_collector.py 100 7
+# 20 fully-parallel cube→bowl demos, full DR, photoreal, one build
+CUDA_VISIBLE_DEVICES=0 ./.venv/bin/python genesis_firefly/tasks/pickplace.py 20 7
 #   -> /data3/genesis_fulldr/demos.hdf5  + videos/cam_{side,lw,rw}/demo_*.mp4   (the fine-tune dataset)
-#   -> output/temp/fulldr_collect/fulldr_third_100.mp4 (10×10 tile) + fourview_demo_*.mp4 (10 four-view tiles)
-# knobs: DATA_DIR, OUT_DIR, SPP (default 32)
+#   -> output/temp/fulldr_collect/fulldr_third_20.mp4 (√N tile) + fourview_demo_*.mp4 (four-view 2×2 tiles)
+# knobs: DATA_DIR, OUT_DIR, SPP (default 32). Entry wrapper: genesis_firefly/runner/collect.py
 
 # render-check the setup:
-CUDA_VISIBLE_DEVICES=0 ./.venv/bin/python genesis_firefly/scenes/manipulation_stage.py
+CUDA_VISIBLE_DEVICES=0 ./.venv/bin/python genesis_firefly/world/manipulation_stage.py
 ```
 
 ## Latest result
@@ -51,16 +51,19 @@ arm/gripper/camera colliders, self-collision on, firm Newton solver — see the 
 
 ## Repo layout (`genesis_firefly/`)
 ```
-scenes/manipulation_stage.py   the reusable SETUP (robot+cameras+rendering+immersive HDRI DR+parallel)
-scenes/firefly_scene.py        TableLayout, firm_rigid_options (firm Newton collision solver)
-scenes/firefly_cameras.py      3 policy cameras + the visible side-camera body/stick rig
+world/manipulation_stage.py    the reusable SETUP (robot+cameras+rendering+immersive HDRI DR+parallel)
+world/firefly_scene.py         TableLayout, firm_rigid_options (firm Newton collision solver), object factory
+world/firefly_cameras.py       3 policy cameras + the visible side-camera body/stick rig
 robots/firefly_dual.py         dual-arm loader: livery URDF, 14-D layout, MIT gains, decomposed collision
-robots/ik.py                   IK bridge (Genesis-native + SODA)
-skills/                        reused RoboLab grasp/place/trajectory skills (pure numpy)
-collectors/pickplace_collector.py   the cube→bowl TASK (thin, on top of ManipulationStage)
+robots/ik.py                   Genesis-native IK adapter (robots/soda_ik/ = the analytic SODA IK, kept)
+skills/                        grasp · pick_place · trajectory · executor (the smooth motion path), pure numpy
+registry/object_spec.py        the object library (ObjectSpec/REGISTRY) + constants
+tasks/pickplace.py             the cube→bowl TASK (thin, on top of ManipulationStage)
+runner/collect.py              entry point: one parallel build of N demos
+dataio/lerobot_exporter.py     HDF5 → LeRobot v2 export for pi0.5
 scripts/bake_firefly_livery.py, bake_soma_panels.py   the livery bakers (run once -> the livery URDF + GLBs)
 assets/                        URDF + meshes + the baked livery GLBs + bowl_clean.obj + object library
-docs/                          you are here
+docs/                          you are here  (start with project_overview.md)
 ```
 
 ## Hard constraints (carried from RoboLab)

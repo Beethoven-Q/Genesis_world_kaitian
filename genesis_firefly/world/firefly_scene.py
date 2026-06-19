@@ -15,14 +15,6 @@ from pathlib import Path
 import numpy as np
 import genesis as gs
 
-import sys as _sys
-_sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "_core_vendored"))
-from object_spec import REGISTRY  # noqa: E402
-
-from robots.firefly_dual import FireflyDual  # noqa: E402
-from robots.livery import apply_livery  # noqa: E402
-from scenes.firefly_cameras import (add_policy_cameras, attach_wrist_cams, add_side_camera_rig)  # noqa: E402
-
 OBJECTS = Path(__file__).resolve().parents[1] / "assets/objects"
 BOWL_USD = OBJECTS / "ycb/bowl.usd"
 BOWL_HALF_H = 0.02748
@@ -105,37 +97,3 @@ def build_bowl(scene, bowl_xy, table_top_z, scale=1.0, surface=None):
         gs.morphs.USD(file=str(BOWL_USD), pos=(bowl_xy[0], bowl_xy[1], z), scale=scale,
                       convexify=True, decompose_object_error_threshold=0.04, decimate=False),
         material=gs.materials.Rigid(rho=400.0, friction=1.0), **kw)
-
-
-class PickPlaceWorld:
-    """Assembles the full pick-place world; build() then finalize()."""
-
-    def __init__(self, object_name: str, object_xy=(0.38, 0.17), bowl_xy=(0.40, 0.02),
-                 layout: TableLayout | None = None, mass=None, with_cameras=True):
-        self.spec = REGISTRY[object_name]
-        self.layout = layout or TableLayout()
-        # substeps=4: the solver runs at dt/4 so contacts resolve HARD -> the firm grip can't sink the fingers
-        # into a solid object (measured: substeps=1 let a finger penetrate 32mm; substeps=4 -> ~1.5mm). This is
-        # the real fix for the GR100<->object penetration, NOT lowering the grip force.
-        self.scene = gs.Scene(sim_options=gs.options.SimOptions(dt=0.01, substeps=4),
-                              rigid_options=firm_rigid_options(), show_viewer=False)
-        self.scene.add_entity(gs.morphs.Plane())
-        self.robot = FireflyDual(self.scene, pos=(0, 0, self.layout.arm_table_height))
-        apply_livery(self.robot)
-        add_tables(self.scene, self.layout)
-        self.obj = build_object(self.scene, self.spec, object_xy, self.layout.object_table_height, mass)
-        self.bowl = build_bowl(self.scene, bowl_xy, self.layout.object_table_height)
-        self.bowl_xy = bowl_xy
-        self.bowl_rest_z = self.layout.object_table_height + BOWL_HALF_H + 0.003
-        self.cams = add_policy_cameras(self.scene) if with_cameras else None
-        if with_cameras:
-            add_side_camera_rig(self.scene)
-        self.dbg = self.scene.add_camera(res=(640, 360), pos=(1.3, -0.9, 0.95),
-                                         lookat=(0.25, 0.0, 0.35), fov=42, GUI=False)
-
-    def build(self):
-        self.scene.build()
-        self.robot.finalize()
-        if self.cams is not None:
-            attach_wrist_cams(self.robot, self.cams)
-        return self
