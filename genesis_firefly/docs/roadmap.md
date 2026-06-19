@@ -134,3 +134,27 @@ phase lands. Requirements live in [project_overview.md](project_overview.md) (bl
   (no false positive; worst pair = the real `box↔gripper` grasp contact); (2) deliberate-overlap probe
   `scripts/temp/pen_probe.py` (two solid boxes spawned overlapping 2 cm) → detector reports **20.00 mm**, all
   envs flagged abnormal → **PASS** (it CATCHES). See `robot_collision_cameras.md` §3g.
+- **2026-06-19 — BUILD-BATCH ORCHESTRATOR (`runner/orchestrate.py`).** *Problem:* `collect.py` runs only ONE
+  build (one "look"); scaling to a large fully-DR dataset needs **B parallel subprocess builds × E envs** with B
+  distinct looks (table-texture/colors/sizes/type/distractor-set bake per build; a 2nd `gs.Scene` in one process
+  segfaults). *Change:* new `runner/orchestrate.py B E [seed0] [dataset]` that **reuses the collector verbatim**.
+  (1) **GPU pool** — detect the pool from `nvidia-smi --query-gpu=index` (or a `GPUS=0,1` override) and run a
+  worker pool of size = n_gpus; each worker pulls the next build off a queue and runs it as a fresh `collect.py`
+  subprocess pinned with `CUDA_VISIBLE_DEVICES=<gpu>` + `DATA_DIR`/`OUT_DIR` shard dirs (**one sim process per
+  GPU**), relaying the key `[COLLECT]` lines tagged `[b g]`. (2) **Shard → merge → symlink** — each build writes
+  `/data3/genesis_fulldr/<dataset>/_shards/build_<b>/` (its own `demos.hdf5`+videos); after all builds, every
+  shard's `/data/demo_<i>` group is **h5py-group-copied** (ALL datasets + ALL attrs preserved) into the merged
+  `<dataset>/demos.hdf5` under a **globally renumbered** `demo_<g>` (g=0..B*E−1) with a `build` attr added; videos
+  are copied+renumbered to `videos/cam_*/demo_<g>.mp4`. Shards are **kept** (failed merge recoverable). An
+  `output/<dataset>` **symlink** → the /data3 dataset gives in-workspace preview. **/data3 writability is gated:
+  FAIL LOUDLY (exit 3) — never silently write into the repo.** (3) **Summary** → `<dataset>/summary.json`
+  (printed): requested vs merged demos, builds ok/failed, clean successes (placed AND not penetrating), grasp
+  rate, total abnormal-penetration count, per-cam video counts, per-build looks. *Verified* (small correctness
+  test, NOT a large run): `orchestrate.py 2 2 900 orch_test` on **2× A6000** → both builds ran **in parallel on
+  GPU 0 & 1**, **2 distinct looks** (build0 distractors `banana,tennis_ball` / build1 `tennis_ball,banana,apple`,
+  different HDRIs/arms), merged **demo_0..demo_3** each with intact `actions`/`states`/`ee_pose` + all attrs
+  (success/arm/seed/hdr/has_distractors/distractors/max_penetration_mm/penetrating) + `build`, **4 matching
+  videos per cam**, `output/orch_test` symlink resolving to /data3, `summary.json` written (4 demos, 2 clean
+  successes, grasp 0.75, 0 abnormal). *Recommended 200-demo run on 2 GPUs:* **B=10 × E=20** (10 looks, ~16 min)
+  or **B=20 × E=10** (20 looks, longer) — prefer more builds (more looks) while E amortizes the build/settle
+  overhead; keep E≤45 for 2K HDRIs. See `runner/README.md` + `project_overview.md` §8.

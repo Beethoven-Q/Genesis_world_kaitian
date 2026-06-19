@@ -230,6 +230,29 @@ HDF5 shards → B×E demos with ≈B distinct "looks" at native photoreal qualit
 HDRIs are original **2K** when `E ≤ 45` (the 1K downscale was only for a single 100-env build). The B×E split is
 a per-dataset flag (e.g. 30×10, 50×20). One sim process per GPU.
 
+**Build-batch orchestration (`runner/orchestrate.py`, see [runner/README.md](../runner/README.md)).**
+`orchestrate.py B E [seed0] [dataset_name]` runs **B builds × E envs = B×E demos**.
+- **GPU pool (one sim process per GPU).** Detects the pool from `nvidia-smi --query-gpu=index` (or a `GPUS=0,1`
+  env override) and runs a worker pool of size = n_gpus. Each worker pulls the next build off a queue, runs it
+  as a **fresh `collect.py` subprocess** with `CUDA_VISIBLE_DEVICES=<gpu>` pinned (the subprocess is mandatory —
+  a 2nd `gs.Scene` in one process segfaults), waits, then pulls the next. Each build's key `[COLLECT]` lines are
+  relayed live, tagged `[b<b> g<gpu>]`. Different seed per build ⇒ a different per-build look (texture / colors /
+  sizes / distractor set) — that IS the cross-build DR variety.
+- **Shard → merge → symlink.** Each build writes a shard at `/data3/genesis_fulldr/<dataset>/_shards/build_<b>/`
+  (its own `demos.hdf5` + `videos/`). After all builds finish, the shards are **merged** into
+  `/data3/genesis_fulldr/<dataset>/demos.hdf5`: each shard's `/data/demo_<i>` group is copied (h5py group copy →
+  ALL datasets + ALL attrs preserved) to a **globally renumbered** `/data/demo_<g>` (g = 0..B*E−1) with a
+  `build` attr added; the per-cam videos are copied+renumbered to `videos/cam_*/demo_<g>.mp4`. Shards are
+  **kept** (a failed merge is recoverable). An `output/<dataset>` **symlink** → the `/data3` dataset gives
+  in-workspace preview. If `/data3` isn't writable the orchestrator **fails loudly** (never writes into the
+  repo).
+- **Summary.** Writes + prints `<dataset>/summary.json`: requested vs merged demos, builds ok/failed, clean
+  successes (placed AND not penetrating), grasp rate, total abnormal-penetration count (the collision gate),
+  per-cam video counts, and the per-build "looks" (each build's distractor set + counts + seed + GPU + wall).
+- **Sizing a 200-demo run.** Total = B×E; wall ≈ `ceil(B / n_gpus) × per-build-time` (a 16-env 640×360 build
+  ≈ 190 s). On 2 GPUs, **B=10 × E=20** (10 looks, ~16 min) or **B=20 × E=10** (20 looks, longer). Prefer more
+  builds (more looks) while E stays large enough to amortize the ~30–40 s build/settle overhead.
+
 ---
 
 ## 9. Repo layout
