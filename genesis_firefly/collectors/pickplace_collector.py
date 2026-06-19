@@ -1,32 +1,29 @@
 #!/usr/bin/env python3
-"""PHOTOREAL full-DR pick-place data collector (Genesis Line B) — RTX-grade via the Nyx path tracer.
+"""PHOTOREAL full-DR pick-place collector (Genesis Line B) — RTX-grade Nyx, ONE fully-parallel build.
 
-god-mode scripted cube->bowl demos under FULL domain randomization, written as the sensor-only fine-tune
-dataset (LeRobot/§4 HDF5) + the third-person tile + four-view tiles. Rendering is REAL: Nyx path tracer +
-PBR materials + an HDRI environment map (image-based light + reflections + a visible 3D room), so every
-trial looks like it is happening in a real office / bedroom / lounge / ... . NO neutral*albedo compositing.
+god-mode scripted cube->bowl demos under FULL domain randomization, all N trials in ONE batched build,
+written as the sensor-only fine-tune dataset (LeRobot/§4 HDF5) + a third-person tile + four-view tiles.
 
-ARCHITECTURE (why subprocess batches): Nyx bakes materials + the env map at build time and a process can
-build only ONE scene (the Vulkan device is single-shot). So per-trial COLOUR/ENVIRONMENT variety comes from
-multiple BUILD-BATCHES, each its own subprocess = one HDRI + one cube/bowl/table colour set + E parallel
-envs (Nyx renders all E at once). PHYSICS DR (arm, poses, yaw, mass, table height, friction) is per-env
-within a batch. The driver fans out B batches across the GPU sequentially, then aggregates.
+FULL DR:
+  physics (per env, independent): which ARM (L/R) · object-table height +/-5cm · bowl xy · cube xy + full
+    in-plane YAW · cube mass · friction.
+  visual  : a DIFFERENT random HDRI environment PER ENV (Nyx per-env env maps -> each trial is in a real
+    room: office/bedroom/lounge/bathroom/... , IMMERSIVE — the room is the backdrop AND the light source;
+    NO ground plane) · cube/bowl/table colours randomized and distinct (never == the table) per run.
 
-  # full run (driver): B*E demos, B distinct environments
-  CUDA_VISIBLE_DEVICES=0 ./.venv/bin/python -m genesis_firefly.collectors.pickplace_collector <N> [seed]
-  # one batch (worker, used by the driver):
-  ... pickplace_collector --batch <bidx> <E> <seed> <shard_dir>
+Rendering is REAL (Nyx path tracer + PBR + HDRI IBL). The arm uses the baked silver/orange-carbon livery +
+a matte entity-surface override so the metal reads neutral in any room. Collision is RoboLab-faithful
+(convex-decomposition bowl -> a cube on the rim rolls in/out, never tunnels; cube spawned clear; gentle
+top-down release).
 
-Knobs: ENV_PER_BATCH (default 10), SPP (default 32). Collision is RoboLab-faithful (convex-decomposition
-bowl -> a cube on the rim rolls in/out, never tunnels; cube spawned clear; gentle top-down release).
+  CUDA_VISIBLE_DEVICES=0 ./.venv/bin/python genesis_firefly/collectors/pickplace_collector.py <N> [seed]
+  Knobs: SPP (default 32). DATA_DIR (/data3/genesis_fulldr), OUT_DIR (output/temp/fulldr_collect).
 """
 import math
 import os
 import sys
 import time
 import glob
-import json
-import subprocess
 import numpy as np
 import genesis as gs
 
@@ -48,23 +45,48 @@ import h5py  # noqa: E402
 RES = (320, 180)                                               # 16:9, all 4 policy/third cams share it
 W, H = RES
 REC_EVERY = 10                                                 # record state + render every K sim steps
-SPP = int(os.environ.get("SPP", "32"))                         # Nyx samples/pixel (denoised; 32 is clean here)
-ENV_PER_BATCH = int(os.environ.get("ENV_PER_BATCH", "10"))
+SPP = int(os.environ.get("SPP", "32"))                         # Nyx samples/pixel (denoised; 32 is clean)
 BOWL_OBJ = os.path.join(os.path.dirname(_HERE), "assets/objects/ycb/bowl_clean.obj")  # Nyx-safe bowl visual
 BG_DIR = "/home/kaitianchao/Projects/RoboLab_firefly/assets/backgrounds"
-_HDRS = sorted(glob.glob(f"{BG_DIR}/indoors/*.hdr") + glob.glob(f"{BG_DIR}/outdoors/*.hdr"))
-# a soft key so contact shadows read; the HDRI does the bulk of the lighting
-LIGHTS = [{"dir": (-0.4, 0.3, -0.85), "color": (1, 1, 1), "intensity": 1.1, "directional": True, "castshadow": True}]
+_HDRS_2K = sorted(glob.glob(f"{BG_DIR}/indoors/*.hdr") + glob.glob(f"{BG_DIR}/outdoors/*.hdr"))
+HDR_1K = "/data3/hdr1k"   # Nyx SEGFAULTS past ~50-60 2K env maps; 1K (1/4 memory) lets all 100 fit in one build
+
+
+def _ensure_1k_pool(n_target=140):
+    """Build/return a pool of 1K HDRIs (downsampled from the 2K library). ONLY valid (cv2-readable) ones —
+    some 2K .hdr are corrupt/unsupported and must be skipped, else they'd reintroduce 2K maps and crash Nyx."""
+    import cv2 as _cv2
+    os.makedirs(HDR_1K, exist_ok=True)
+    if len(glob.glob(f"{HDR_1K}/*.hdr")) < 100:
+        for p in _HDRS_2K:
+            if len(glob.glob(f"{HDR_1K}/*.hdr")) >= n_target:
+                break
+            o = os.path.join(HDR_1K, os.path.basename(p))
+            if os.path.exists(o):
+                continue
+            im = _cv2.imread(p, _cv2.IMREAD_ANYDEPTH | _cv2.IMREAD_COLOR)
+            if im is None:
+                continue
+            _cv2.imwrite(o, _cv2.resize(im, (1024, 512), interpolation=_cv2.INTER_AREA))
+    return sorted(glob.glob(f"{HDR_1K}/*.hdr"))
+
+
+_HDRS = _ensure_1k_pool()   # the per-env background pool (1K, valid-only)
+# matte arm override: Nyx applies this entity surface to the whole URDF (color=None -> per-mesh texture
+# colours kept), killing the warm-env mirror so the silver livery reads neutral in any room.
+ARM_SURF = dict(metallic=0.0, roughness=0.7)
+# a soft neutral key so the arm/objects read + contact shadows show; the HDRI does the bulk of the lighting.
+LIGHTS = [{"dir": (-0.4, 0.3, -0.85), "color": (1, 1, 1), "intensity": 1.2, "directional": True, "castshadow": True}]
 
 
 def np_(x):
     return x.cpu().numpy() if hasattr(x, "cpu") else np.asarray(x)
 
 
-# ================================================================== 1a. PER-BATCH VISUAL DR ================
-def pick_batch_visuals(rng):
-    """One HDRI environment + one distinct cube/bowl/table colour set for this whole build-batch (Nyx bakes
-    materials at build). Cube & bowl are saturated and NEVER ~= the table colour (or each other)."""
+# ================================================================== 1. DOMAIN RANDOMIZATION ================
+def pick_colors(rng):
+    """One distinct cube/bowl/table colour set for the run (shared across envs — Nyx materials bake at build).
+    Cube & bowl are saturated and NEVER ~= the table colour or each other."""
     def hsv_rgb(h, s, v):
         rgb = cv2.cvtColor(np.array([[[h, s * 255, v * 255]]], np.uint8), cv2.COLOR_HSV2RGB)[0, 0]
         return tuple((rgb.astype(np.float32) / 255.0).tolist())
@@ -72,7 +94,6 @@ def pick_batch_visuals(rng):
     def huedist(a, b):
         d = abs(a - b); return min(d, 179 - d)
 
-    # table: ~40% neutral grey, else warm wood/tan
     if rng.rand() < 0.4:
         g = 0.45 + 0.35 * rng.rand(); table = (g, g, g); tab_h, tab_s, tab_v = 0.0, 0.0, g
     else:
@@ -92,21 +113,20 @@ def pick_batch_visuals(rng):
 
     ch, cube = distinct()
     _, bowl = distinct(ch)
-    atable = tuple(0.7 * c for c in table)                     # arm table = a darker shade of the object table
-    return dict(hdr=_HDRS[rng.randint(len(_HDRS))], cube=cube, bowl=bowl, table=table, atable=atable)
+    atable = tuple(0.7 * c for c in table)
+    return dict(cube=cube, bowl=bowl, table=table, atable=atable)
 
 
-# ================================================================== 1b. PER-ENV PHYSICS DR ================
-def sample_phys_dr(E, rng, lay, spec):
-    """Per-env physics DR: which ARM, table height, bowl xy, cube xy+yaw (spawned clear of the bowl), mass."""
+def sample_dr(N, rng, lay, spec):
+    """Per-env physics DR + per-env HDRI choice (the background of each trial)."""
     ho = lay.object_table_height
-    side_is_left = rng.rand(E) < 0.5
+    side_is_left = rng.rand(N) < 0.5
     sgn = np.where(side_is_left, 1.0, -1.0)
-    tabZ = ho + (rng.rand(E) - 0.5) * 0.10                     # object-table height +/-5cm
-    bowx = 0.40 + (rng.rand(E) - 0.5) * 0.10
-    bowy = sgn * (0.05 + (rng.rand(E) - 0.5) * 0.07)
-    cubx = 0.40 + (rng.rand(E) - 0.5) * 0.12
-    cuby = sgn * (0.185 + (rng.rand(E) - 0.5) * 0.10)
+    tabZ = ho + (rng.rand(N) - 0.5) * 0.10
+    bowx = 0.40 + (rng.rand(N) - 0.5) * 0.10
+    bowy = sgn * (0.05 + (rng.rand(N) - 0.5) * 0.07)
+    cubx = 0.40 + (rng.rand(N) - 0.5) * 0.12
+    cuby = sgn * (0.185 + (rng.rand(N) - 0.5) * 0.10)
     for _ in range(40):                                       # a cube can never start inside a bowl in reality
         bad = np.hypot(cubx - bowx, cuby - bowy) < 0.125
         if not bad.any():
@@ -114,38 +134,43 @@ def sample_phys_dr(E, rng, lay, spec):
         nb = int(bad.sum())
         cubx[bad] = 0.40 + (rng.rand(nb) - 0.5) * 0.12
         cuby[bad] = sgn[bad] * (0.185 + (rng.rand(nb) - 0.5) * 0.10)
-    yaw = (rng.rand(E) - 0.5) * np.radians(180)
-    mass_shift = ((rng.rand(E, 1) - 0.5) * 0.04).astype(np.float32)
-    return dict(side_is_left=side_is_left, sgn=sgn, tabZ=tabZ, bowx=bowx, bowy=bowy,
-                cubx=cubx, cuby=cuby, yaw=yaw, mass_shift=mass_shift)
+    yaw = (rng.rand(N) - 0.5) * np.radians(180)
+    mass_shift = ((rng.rand(N, 1) - 0.5) * 0.04).astype(np.float32)
+    hdr_idx = rng.choice(len(_HDRS), N, replace=len(_HDRS) < N)   # a different room per env
+    return dict(side_is_left=side_is_left, sgn=sgn, tabZ=tabZ, bowx=bowx, bowy=bowy, cubx=cubx, cuby=cuby,
+                yaw=yaw, mass_shift=mass_shift, hdrs=[_HDRS[i] for i in hdr_idx])
 
 
-# ================================================================== 2. PHOTOREAL SCENE + 4 NYX CAMERAS ====
-def build_scene(E, lay, vis):
+# ================================================================== 2. ONE FULLY-PARALLEL PHOTOREAL SCENE ==
+def build_scene(N, lay, colors, hdr_paths):
     from gs_nyx_plugin.nyx_camera_options import NyxCameraOptions
     from gs_nyx import nyx_py_sdk as nps
-    env = nps.EnvironmentMapAsset(); env.texture = vis["hdr"]
-    env.layout = nps.EEnvMapLayout.LongLat; env.multiplier = 1.0
+    cap = int(os.environ.get("MAX_ENVMAPS", "0")) or len(hdr_paths)   # cap distinct env maps (memory/limit)
+    emaps = []                                                # one (1K) HDRI per env -> per-env backgrounds
+    for hp in hdr_paths[:cap]:                                # hp is already a 1K path from the pool
+        e = nps.EnvironmentMapAsset(); e.texture = hp; e.layout = nps.EEnvMapLayout.LongLat
+        e.multiplier = 1.0; emaps.append(e)
+    env_maps = tuple(emaps)
     scene = gs.Scene(sim_options=gs.options.SimOptions(dt=0.01, substeps=4), rigid_options=firm_rigid_options(),
                      show_viewer=False)
     ha, ho = lay.arm_table_height, lay.object_table_height
-    scene.add_entity(gs.morphs.Plane(), surface=gs.surfaces.Rough(color=(0.5, 0.5, 0.52)))   # physics floor
-    robot = FireflyDual(scene, pos=(0, 0, ha))                # loads the baked-livery URDF by default
+    # NO ground plane -> the HDRI room IS the immersive floor+walls backdrop; the two tables are the surfaces.
+    robot = FireflyDual(scene, pos=(0, 0, ha), surface=gs.surfaces.Default(**ARM_SURF))   # matte livery
     scene.add_entity(gs.morphs.Box(size=(lay.arm_table_depth, lay.common_width, ha),
                      pos=(lay.seam_x - lay.arm_table_depth / 2, 0, ha / 2), fixed=True, collision=True),
-                     surface=gs.surfaces.Plastic(color=vis["atable"], roughness=0.5))
+                     surface=gs.surfaces.Plastic(color=colors["atable"], roughness=0.5))
     otab = scene.add_entity(gs.morphs.Box(size=(lay.object_table_depth, lay.common_width, ho),
                             pos=(lay.seam_x + lay.object_table_depth / 2, 0, ho / 2), fixed=True, collision=True),
-                            surface=gs.surfaces.Plastic(color=vis["table"], roughness=0.55))
+                            surface=gs.surfaces.Plastic(color=colors["table"], roughness=0.55))
     spec = REGISTRY["cube"]
     cube = scene.add_entity(gs.morphs.Box(size=tuple(spec.scaled_extents()), pos=(0.40, 0.18, 0.30)),
                             material=gs.materials.Rigid(rho=600.0, friction=1.0),
-                            surface=gs.surfaces.Plastic(color=vis["cube"], roughness=0.35))
-    bowl = scene.add_entity(gs.morphs.Mesh(file=BOWL_OBJ, convexify=True,                     # Nyx-safe + decomp
+                            surface=gs.surfaces.Plastic(color=colors["cube"], roughness=0.35))
+    bowl = scene.add_entity(gs.morphs.Mesh(file=BOWL_OBJ, convexify=True,
                             decompose_object_error_threshold=0.04, decimate=False),
                             material=gs.materials.Rigid(rho=400.0, friction=1.0),
-                            surface=gs.surfaces.Smooth(color=vis["bowl"]))
-    add_side_camera_rig(scene)                                # visible D435i body + support stick (real rig)
+                            surface=gs.surfaces.Smooth(color=colors["bowl"]))
+    add_side_camera_rig(scene)                                # visible D435i body + support stick
 
     def link_local(name):
         lk = robot.entity.get_link(name)
@@ -155,10 +180,10 @@ def build_scene(E, lay, vis):
         return int(lk.idx - robot.entity.link_start)
 
     eidx = robot.entity.idx
-    nc = dict(lights=LIGHTS, env_maps=(env,), spp=SPP, denoise=True)
+    nc = dict(lights=LIGHTS, env_maps=env_maps, spp=SPP, denoise=True)
     cams = {
-        "third": scene.add_sensor(NyxCameraOptions(res=RES, pos=(1.18, -0.95, 0.78), lookat=(0.26, 0.0, 0.34),
-                 fov=46, **nc)),
+        "third": scene.add_sensor(NyxCameraOptions(res=RES, pos=(1.15, -0.95, 0.62), lookat=(0.30, 0.0, 0.34),
+                 fov=48, **nc)),                              # low cam -> the room shows behind the arm
         "cam_side": scene.add_sensor(NyxCameraOptions(res=RES, pos=tuple(SIDE[0]), lookat=(0.40, 0.0, 0.28),
                     fov=SIDE_VFOV, **nc)),
         "cam_lw": scene.add_sensor(NyxCameraOptions(res=RES, fov=WRIST_VFOV, entity_idx=eidx,
@@ -166,15 +191,14 @@ def build_scene(E, lay, vis):
         "cam_rw": scene.add_sensor(NyxCameraOptions(res=RES, fov=WRIST_VFOV, entity_idx=eidx,
                   link_idx_local=link_local("right_link_6"), offset_T=_T(*RIGHT_WRIST), **nc)),
     }
-    scene.build(n_envs=E, env_spacing=(0.0, 0.0))             # spacing 0 -> each env renders isolated (no bleed)
+    scene.build(n_envs=N, env_spacing=(0.0, 0.0))             # spacing 0 -> each env renders its own room
     robot.finalize()
     return scene, robot, dict(otab=otab, cube=cube, bowl=bowl, spec=spec), cams
 
 
 def render_all(cams):
-    """Render the 4 batched Nyx cameras via the SENSOR API (cam.read()) -> {name: (E,H,W,3) uint8}. read()
-    routes through _render_current_state which re-attaches the wrist cams to link_6 each frame, so cam_lw /
-    cam_rw are TRUE egocentric views (the low-level renderer would leave them at their build pose)."""
+    """Render the 4 batched Nyx cameras via the SENSOR API (cam.read()) -> {name: (N,H,W,3) uint8}. read()
+    re-attaches the wrist cams to link_6 each frame (true egocentric); env_maps make each env its own room."""
     out = {}
     for nm, cam in cams.items():
         cam._stale = True
@@ -182,35 +206,51 @@ def render_all(cams):
     return out
 
 
-# ================================================================== 3. ONE BATCH (worker) =================
-def collect_batch(bidx, E, seed, shard_dir):
+def _label(img, text):
+    im = img.copy()
+    cv2.rectangle(im, (0, 0), (len(text) * 7 + 6, 16), (0, 0, 0), -1)
+    cv2.putText(im, text, (3, 12), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1, cv2.LINE_AA)
+    return im
+
+
+def tile(frames):
+    N = len(frames); g = int(math.ceil(math.sqrt(N)))
+    t = np.zeros((g * H, g * W, 3), np.uint8)
+    for i in range(N):
+        r, c = divmod(i, g); t[r * H:(r + 1) * H, c * W:(c + 1) * W] = frames[i]
+    return t
+
+
+# ================================================================== 3. COLLECT (single build, all N) ======
+def collect(N, seed, data_dir, out_dir):
     rng = np.random.RandomState(seed)
     lay = TableLayout()
-    vis = pick_batch_visuals(rng)
-    dr = sample_phys_dr(E, rng, lay, spec=REGISTRY["cube"])
+    spec = REGISTRY["cube"]
+    colors = pick_colors(rng)
+    dr = sample_dr(N, rng, lay, spec)
     t0 = time.time()
-    scene, robot, ents, cams = build_scene(E, lay, vis)
-    cube, bowl, otab, spec = ents["cube"], ents["bowl"], ents["otab"], ents["spec"]
+    scene, robot, ents, cams = build_scene(N, lay, colors, dr["hdrs"])
+    cube, bowl, otab = ents["cube"], ents["bowl"], ents["otab"]
     ee = {"l": robot.entity.get_link(robot.ee["left"]), "r": robot.entity.get_link(robot.ee["right"])}
     gdrv, gmim, armdof = robot.grip_driven, robot.grip_mimic, robot.arm
     state14 = robot.state14_idx
-    print(f"[BATCH {bidx}] built E={E} hdr={os.path.basename(vis['hdr'])} in {time.time()-t0:.1f}s", flush=True)
+    print(f"[COLLECT] built N={N} (one parallel build, {N} environments) in {time.time()-t0:.1f}s", flush=True)
 
     # ---- apply DR + settle ----
     ho = lay.object_table_height
     tabZ, bowx, bowy, cubx, cuby = dr["tabZ"], dr["bowx"], dr["bowy"], dr["cubx"], dr["cuby"]
     side_is_left, yaw = dr["side_is_left"], dr["yaw"]
     qz = np.stack([np.cos(yaw / 2), 0 * yaw, 0 * yaw, np.sin(yaw / 2)], 1).astype(np.float32)
-    otab.set_pos(np.stack([np.full(E, lay.seam_x + lay.object_table_depth / 2), np.zeros(E), tabZ - ho / 2], 1).astype(np.float32))
+    otab.set_pos(np.stack([np.full(N, lay.seam_x + lay.object_table_depth / 2), np.zeros(N), tabZ - ho / 2], 1).astype(np.float32))
     bowl.set_pos(np.stack([bowx, bowy, tabZ + BOWL_HALF_H + 0.003], 1).astype(np.float32))
     cube_top = tabZ + spec.scaled_extents()[2] / 2 + 0.002
     cube.set_pos(np.stack([cubx, cuby, cube_top + 0.01], 1).astype(np.float32)); cube.set_quat(qz)
     try:
         cube.set_mass_shift(dr["mass_shift"])
-        robot.entity.set_friction_ratio((0.7 + 0.6 * rng.rand(E, robot.entity.n_links)).astype(np.float32))
+        robot.entity.set_friction_ratio((0.7 + 0.6 * rng.rand(N, robot.entity.n_links)).astype(np.float32))
     except Exception as e:
-        print(f"[BATCH {bidx}] mass/fric DR skipped: {e}", flush=True)
-    home16 = np.tile(robot.home_qpos(), (E, 1)).astype(np.float32)
+        print(f"[COLLECT] mass/fric DR skipped: {e}", flush=True)
+    home16 = np.tile(robot.home_qpos(), (N, 1)).astype(np.float32)
     for _ in range(70):
         robot.entity.control_dofs_position(home16); scene.step()
     root0 = np_(cube.get_pos())
@@ -232,8 +272,8 @@ def collect_batch(bidx, E, seed, shard_dir):
         s = "left" if side_is_left[i] else "right"
         return transport_quats(tilted_base_quat(np.array([bowx[i], bowy[i]]) - base[s], 8.0), reference_quat=gqi)[0]
 
-    gq = np.stack([gquat(i) for i in range(E)]).astype(np.float64)
-    cq = np.stack([cquat(i, gq[i]) for i in range(E)]).astype(np.float64)
+    gq = np.stack([gquat(i) for i in range(N)]).astype(np.float64)
+    cq = np.stack([cquat(i, gq[i]) for i in range(N)]).astype(np.float64)
 
     def ik(link, tool_pos, tool_quat):
         Rt = np.stack([_R_from_wxyz(q) for q in tool_quat])
@@ -269,6 +309,7 @@ def collect_batch(bidx, E, seed, shard_dir):
             grip.append(float(WP[i][3] + (WP[i + 1][3] - WP[i][3]) * u)); labs.append(WP[i + 1][0])
     T = len(traj)
     li, ri = np.where(side_is_left)[0], np.where(~side_is_left)[0]
+    print(f"[COLLECT] planned T={T} ({len(li)} left / {len(ri)} right arm)", flush=True)
 
     # ---- execute + RECORD (states/actions + render 4 Nyx cams every REC_EVERY) ----
     acts, jpos, jvel, eepos, eequat = [], [], [], [], []
@@ -309,6 +350,7 @@ def collect_batch(bidx, E, seed, shard_dir):
         cam_steps[nm].append(views[nm])
     if lift_pos is None:
         lift_pos = np_(cube.get_pos())
+    wall = time.time() - t0
 
     # ---- score + realistic penetration check (per-env bowl centre) ----
     objf = np_(cube.get_pos())
@@ -321,17 +363,20 @@ def collect_batch(bidx, E, seed, shard_dir):
              (objf[:, 2] - ch2 < rim_z + 0.01) & (np.linalg.norm(objf - eep, axis=1) > 0.08)
     bottom = objf[:, 2] - ch2
     wall_pen = (((rxy > 0.065) & (rxy < 0.11) & (bottom > tabZ + 0.012) & (bottom < rim_z)) | (bottom < tabZ - 0.015))
-    print(f"[BATCH {bidx}] {int((lift_cm>3).sum())}/{E} grasped, {int(placed.sum())}/{E} placed, "
-          f"through-wall={int(wall_pen.sum())}/{E}  render+sim {time.time()-t0:.1f}s", flush=True)
+    print(f"[COLLECT] {int((lift_cm>3).sum())}/{N} grasped, {int(placed.sum())}/{N} placed, "
+          f"through-wall={int(wall_pen.sum())}/{N}  render+sim {wall:.1f}s", flush=True)
 
-    # ---- write the shard (states/actions HDF5 + raw 4-cam frames npz, global demo indices) ----
-    os.makedirs(shard_dir, exist_ok=True)
-    acts = np.stack(acts, 1); jpos = np.stack(jpos, 1); jvel = np.stack(jvel, 1)   # (E,Tr,14)
+    # ---- write the fine-tune data (HDF5 §4 schema + 3 policy-cam videos) + tiles ----
+    os.makedirs(data_dir, exist_ok=True); os.makedirs(out_dir, exist_ok=True)
+    acts = np.stack(acts, 1); jpos = np.stack(jpos, 1); jvel = np.stack(jvel, 1)   # (N,Tr,14)
     eepos = np.stack(eepos, 1); eequat = np.stack(eequat, 1)
-    gidx = bidx * ENV_PER_BATCH + np.arange(E)
-    with h5py.File(os.path.join(shard_dir, f"shard_{bidx}.hdf5"), "w") as f:
-        for e in range(E):
-            d = f.create_group(f"data/demo_{int(gidx[e])}")
+    Tr = acts.shape[1]
+    vdir = os.path.join(data_dir, "videos")
+    for nm in ("cam_side", "cam_lw", "cam_rw"):
+        os.makedirs(os.path.join(vdir, nm), exist_ok=True)
+    with h5py.File(os.path.join(data_dir, "demos.hdf5"), "w") as f:
+        for e in range(N):
+            d = f.create_group(f"data/demo_{e}")
             d.create_dataset("actions", data=acts[e].astype(np.float32))
             sg = d.create_group("states/articulation/robot")
             sg.create_dataset("joint_position", data=jpos[e].astype(np.float32))
@@ -339,107 +384,35 @@ def collect_batch(bidx, E, seed, shard_dir):
             pg = d.create_group("ee_pose")
             pg.create_dataset("position", data=eepos[e].astype(np.float32))
             pg.create_dataset("orientation", data=eequat[e].astype(np.float32))
-            d.attrs["num_samples"] = acts.shape[1]; d.attrs["success"] = bool(placed[e]); d.attrs["seed"] = int(seed)
+            d.attrs["num_samples"] = Tr; d.attrs["success"] = bool(placed[e]); d.attrs["seed"] = int(seed)
             d.attrs["arm"] = "left" if side_is_left[e] else "right"
-    frames = {nm: np.stack(cam_steps[nm], 1) for nm in cams}    # each (E,Tr,H,W,3) uint8
-    np.savez_compressed(os.path.join(shard_dir, f"frames_{bidx}.npz"),
-                        gidx=gidx, success=placed, arm=side_is_left,
-                        third=frames["third"], cam_side=frames["cam_side"],
-                        cam_lw=frames["cam_lw"], cam_rw=frames["cam_rw"])
-    print(f"[BATCH {bidx}] shard written -> {shard_dir}", flush=True)
-    return int(placed.sum()), int(wall_pen.sum())
-
-
-# ================================================================== 4. DRIVER (fan out + aggregate) =======
-def _label(img, text):
-    im = img.copy()
-    cv2.rectangle(im, (0, 0), (len(text) * 7 + 6, 16), (0, 0, 0), -1)
-    cv2.putText(im, text, (3, 12), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1, cv2.LINE_AA)
-    return im
-
-
-def tile(frames):
-    N = len(frames); g = int(math.ceil(math.sqrt(N)))
-    t = np.zeros((g * H, g * W, 3), np.uint8)
-    for i in range(N):
-        r, c = divmod(i, g); t[r * H:(r + 1) * H, c * W:(c + 1) * W] = frames[i]
-    return t
-
-
-def aggregate(shard_dir, data_dir, out_dir, N, seed):
-    os.makedirs(data_dir, exist_ok=True); os.makedirs(out_dir, exist_ok=True)
-    shards = sorted(glob.glob(os.path.join(shard_dir, "frames_*.npz")),
-                    key=lambda p: int(p.split("_")[-1].split(".")[0]))
-    # merge HDF5 shards
-    with h5py.File(os.path.join(data_dir, "demos.hdf5"), "w") as out:
-        for hp in sorted(glob.glob(os.path.join(shard_dir, "shard_*.hdf5"))):
-            with h5py.File(hp, "r") as f:
-                for k in f["data"]:
-                    f.copy(f[f"data/{k}"], out.require_group("data"), name=k)
-    # gather frames by global demo index
-    byg = {}
-    succ = {}
-    for sp in shards:
-        z = np.load(sp)
-        for j, g in enumerate(z["gidx"]):
-            byg[int(g)] = {nm: z[nm][j] for nm in ("third", "cam_side", "cam_lw", "cam_rw")}
-            succ[int(g)] = bool(z["success"][j])
-    order_g = sorted(byg)[:N]
-    Tr = byg[order_g[0]]["third"].shape[0]
-    vdir = os.path.join(data_dir, "videos")
-    for nm in ("cam_side", "cam_lw", "cam_rw"):
-        os.makedirs(os.path.join(vdir, nm), exist_ok=True)
-    # per-demo policy-cam videos (the sensor-only stream)
-    for g in order_g:
-        for nm in ("cam_side", "cam_lw", "cam_rw"):
-            iio.imwrite(os.path.join(vdir, nm, f"demo_{g}.mp4"), byg[g][nm], fps=12, codec="libx264")
+            d.attrs["hdr"] = os.path.basename(dr["hdrs"][e])
+            for nm in ("cam_side", "cam_lw", "cam_rw"):        # the sensor-only policy stream
+                vid = np.stack([cam_steps[nm][t][e] for t in range(Tr)])
+                iio.imwrite(os.path.join(vdir, nm, f"demo_{e}.mp4"), vid, fps=12, codec="libx264")
     # sqrt(N) third-person tile video
-    third_tiles = [tile([byg[g]["third"][t] for g in order_g]) for t in range(Tr)]
-    iio.imwrite(os.path.join(out_dir, f"fulldr_third_{len(order_g)}.mp4"), np.stack(third_tiles), fps=12, codec="libx264")
+    third_tiles = [tile([cam_steps["third"][t][e] for e in range(N)]) for t in range(Tr)]
+    iio.imwrite(os.path.join(out_dir, f"fulldr_third_{N}.mp4"), np.stack(third_tiles), fps=12, codec="libx264")
     # 10 random demos -> labelled 2x2 (third + side + 2 wrist) tiles
-    rng = np.random.RandomState(seed)
-    chosen = sorted(rng.choice(order_g, size=min(10, len(order_g)), replace=False).tolist())
+    chosen = sorted(rng.choice(N, size=min(10, N), replace=False).tolist())
     lab = {"third": "third", "cam_side": "side", "cam_lw": "wrist-L", "cam_rw": "wrist-R"}
-    for g in chosen:
+    for e in chosen:
         frames = []
         for t in range(Tr):
-            q = {nm: _label(byg[g][nm][t], lab[nm]) for nm in lab}
+            q = {nm: _label(cam_steps[nm][t][e], lab[nm]) for nm in lab}
             frames.append(np.vstack([np.hstack([q["third"], q["cam_side"]]),
                                      np.hstack([q["cam_lw"], q["cam_rw"]])]))
-        iio.imwrite(os.path.join(out_dir, f"fourview_demo_{g}.mp4"), np.stack(frames), fps=12, codec="libx264")
-    nsucc = sum(succ[g] for g in order_g)
-    print(f"[AGG] merged {len(order_g)} demos ({nsucc} placed) -> {data_dir}/demos.hdf5 ; tiles -> {out_dir}")
-    print(f"[AGG] four-view demos: {chosen}")
+        iio.imwrite(os.path.join(out_dir, f"fourview_demo_{e}.mp4"), np.stack(frames), fps=12, codec="libx264")
+    print(f"[COLLECT] wrote {N} demos ({int(placed.sum())} placed) -> {data_dir}/demos.hdf5 + videos ; "
+          f"tiles -> {out_dir} (4view demos {chosen})")
     print("COLLECT_DONE")
-
-
-def drive(N, seed, data_dir, out_dir):
-    E = ENV_PER_BATCH
-    B = int(math.ceil(N / E))
-    shard_dir = os.path.join(out_dir, "shards")
-    os.makedirs(shard_dir, exist_ok=True)
-    print(f"[DRIVE] {N} demos = {B} batches x {E} envs (each batch = 1 environment + colour set)", flush=True)
-    me = os.path.abspath(__file__)
-    env = dict(os.environ)
-    t0 = time.time()
-    tot_p = tot_w = 0
-    for b in range(B):
-        r = subprocess.run([sys.executable, me, "--batch", str(b), str(E), str(seed + 1000 + b), shard_dir], env=env)
-        if r.returncode != 0:
-            print(f"[DRIVE] batch {b} FAILED rc={r.returncode}", flush=True)
-    # parse per-batch results from the shards (robust to a dropped batch)
-    aggregate(shard_dir, data_dir, out_dir, N, seed)
-    print(f"[DRIVE] total wall {time.time()-t0:.1f}s")
+    return dict(placed=int(placed.sum()), grasped=int((lift_cm > 3).sum()), through_wall=int(wall_pen.sum()))
 
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == "--batch":
-        _, _, bidx, E, bseed, shard_dir = sys.argv
-        gs.init(backend=gs.gpu)
-        collect_batch(int(bidx), int(E), int(bseed), shard_dir)
-    else:
-        N = int(sys.argv[1]) if len(sys.argv) > 1 else 100
-        SEED = int(sys.argv[2]) if len(sys.argv) > 2 else 7
-        DATA = os.environ.get("DATA_DIR", "/data3/genesis_fulldr")
-        OUT = os.environ.get("OUT_DIR", "genesis_firefly/output/temp/fulldr_collect")
-        drive(N, SEED, DATA, OUT)
+    N = int(sys.argv[1]) if len(sys.argv) > 1 else 100
+    SEED = int(sys.argv[2]) if len(sys.argv) > 2 else 7
+    DATA = os.environ.get("DATA_DIR", "/data3/genesis_fulldr")
+    OUT = os.environ.get("OUT_DIR", "genesis_firefly/output/temp/fulldr_collect")
+    gs.init(backend=gs.gpu)
+    collect(N, SEED, DATA, OUT)
