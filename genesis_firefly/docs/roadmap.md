@@ -158,3 +158,31 @@ phase lands. Requirements live in [project_overview.md](project_overview.md) (bl
   successes, grasp 0.75, 0 abnormal). *Recommended 200-demo run on 2 GPUs:* **B=10 × E=20** (10 looks, ~16 min)
   or **B=20 × E=10** (20 looks, longer) — prefer more builds (more looks) while E amortizes the build/settle
   overhead; keep E≤45 for 2K HDRIs. See `runner/README.md` + `project_overview.md` §8.
+- **2026-06-19 — DEGENERATE-TRAJECTORY BLOWUP (cube ejected off the table → a 10× build).** *Symptom:* in the
+  200-trial run, builds with seeds **1001** and **1005** each had ONE env whose densified trajectory blew up to
+  **T=10,769 steps** (10× the normal ~1075) with **max per-step |dq| = 0.936 rad** (normal ~0.03). Because the
+  `BatchExecutor` pads ALL envs to the max length T, that 10×'d every env in those builds → a **~41-min build**
+  (vs ~5 min) and at least one jerky demo. *Root cause* (diagnosed plan-only via `scripts/temp/diag_degen*.py`,
+  which run the REAL `collect()` but monkeypatch `BatchExecutor.run`/`settle_home` to capture waypoints +
+  per-step cube pose WITHOUT executing): at seed 1001 **env 7** spawned its cube only **7.0 cm** (centre-to-
+  centre) from the bowl — INSIDE the bowl wall (cube circumradius 3.5 cm + bowl radius ~7.5 cm ≈ 11 cm needed).
+  `sample_phys_dr`'s cube↔bowl rejection loop **exhausted its 60 tries and SILENTLY shipped the still-overlapping
+  pose** (no fallback; ~6 % of `clr=0.17` bowls are even geometrically infeasible). The firm solver then **ejected
+  the overlapping cube on settle step 0** (|v| 1.8 m/s, climbing) and — because the immersive scene has **NO ground
+  plane** — it **free-fell off the table to z=−6 m** (|v|=11 m/s by step 139). That garbage settled pose feeds the
+  grasp waypoints (`gc = cube.get_pos()`), so the `home→pre` segment spanned **6.5 m** → `densify` emitted
+  `n = 6.5/0.13/0.01 ≈ 5021` steps → the whole build padded to ~10,700. (NOT the home-pose-displacement
+  hypothesis — the home tool pose was sane; it was the CUBE waypoint.) *Fix — defense in depth (3 layers):*
+  **(1) cap `densify`** (`skills/trajectory.py`): new `max_move_steps=600` kwarg HARD-caps any single segment's
+  step count (6 s at dt=0.01, well above the ~540 a real 0.7 m move needs), threaded through `BatchExecutor`
+  (`skills/executor.py`); a degenerate waypoint can no longer dominate T regardless of distance, normal moves
+  unchanged. **(2) waypoint sanity guard + REJECT** (`tasks/pickplace.py`): after settle, flag any env whose
+  settled cube is non-finite, drifted >5 cm in XY from its spawn, or off the table in z as `degenerate` → CLAMP
+  its cube pose back on-table (sane motion) AND force `success=False` (a phantom-target demo never ships; HDF5
+  attr `degenerate`). **(3) root-cause spawn fix** (`tasks/pickplace.py` `sample_phys_dr`): after the rejection
+  loop, push any env still inside the 0.125 m hard floor RADIALLY OUT from the bowl to exactly that floor — a
+  cube can no longer spawn intersecting the bowl by construction, so the ejection can't happen. *Verified:*
+  `pickplace.py 20 1001` → **T=1051** (was 10,716), wall **232 s** (was ~2400), **|dq|=0.033 rad**, **20/20
+  grasped, 20/20 placed**, abnormal-penetration **0/20**; regression `20 1005` → T=1058, 267 s, |dq|=0.037,
+  20/20, 0/20; `20 7` → T=1041, 228 s, |dq|=0.033, 20/20, 0/20. The blowup is gone and smooth motion + parity
+  are preserved. See `pickplace_task_and_dataformat.md` (densify cap + degenerate guard).

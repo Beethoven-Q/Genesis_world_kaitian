@@ -42,7 +42,7 @@ def _quat_angle(q0, q1):
 
 
 def densify(waypoints, *, lin_speed=0.15, ang_speed=1.5, dt=0.01,
-            min_move_steps=12, dwell_steps=80):
+            min_move_steps=12, dwell_steps=80, max_move_steps=600):
     """Densify sparse ``(label, pos, quat_wxyz, grip[, speed])`` waypoints into per-control-step samples.
 
     Returns a list of ``(pos[3], quat_wxyz[4], grip, label)``. Each consecutive pair is connected by
@@ -53,7 +53,15 @@ def densify(waypoints, *, lin_speed=0.15, ang_speed=1.5, dt=0.01,
 
     An optional 5th element on a waypoint sets the LINEAR speed of the segment LEAVING it (e.g. a fast
     free-space approach into the pre-grasp, while the fine manipulation segments stay at ``lin_speed``).
-    """
+
+    ``max_move_steps`` is a HARD upper bound on the per-segment step count (default 600 ~= 6 s at dt=0.01,
+    well above any sane workspace move: ~0.7 m / 0.13 m/s ~= 5.4 s -> ~540 steps). Normal moves never hit
+    it (the gentle constant-speed profile is unchanged); it ONLY engages when a DEGENERATE waypoint (a
+    cube ejected off the table, a NaN/out-of-workspace target) produces an absurd distance. Without it, one
+    such segment can be ``n = 6.5 m / 0.13 m/s / 0.01 = 5000`` steps and -- because the BatchExecutor pads
+    EVERY env to the max length T -- 10x the whole build's trajectory (the 2026-06-19 degenerate-blowup bug,
+    docs/roadmap.md). The cap means a degenerate env can no longer dominate T regardless of its waypoints
+    (defense in depth alongside the task-layer waypoint sanity check that REJECTS such a demo)."""
     def _unpack(w):
         s = float(w[4]) if len(w) > 4 and w[4] is not None else None
         return (w[0], np.asarray(w[1], float), np.asarray(w[2], float), float(w[3]), s)
@@ -69,6 +77,7 @@ def densify(waypoints, *, lin_speed=0.15, ang_speed=1.5, dt=0.01,
             continue
         spd = s0 if s0 is not None else lin_speed           # per-waypoint speed override for this segment
         n = max(min_move_steps, int(np.ceil(max(lin / spd, ang / ang_speed) / dt)))
+        n = min(n, int(max_move_steps))                     # HARD cap: a degenerate waypoint can't blow up T
         e = ease(np.linspace(0.0, 1.0, n + 1)[1:])
         pos = p0[None] + (p1 - p0)[None] * e[:, None]
         quat = _slerp(q0, q1, e)

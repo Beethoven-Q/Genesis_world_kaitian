@@ -56,7 +56,15 @@ def sample_phys_dr(N, rng, lay, spec):
     # keep the cube CLEAR of the bowl so the open gripper doesn't bump the bowl on the grasp descent. The
     # MAJORITY (~80%) get a generous clearance; a MINORITY (~20%) are allowed close (hard edge cases -> useful
     # recovery data, per the DR "accept hard edge cases" rule). The 0.125 floor still forbids cube-in-bowl.
-    clr = np.where(rng.rand(N) < 0.8, 0.17, 0.125)
+    # HARD floor 0.125 forbids cube-in-bowl (the cube circumradius ~3.5cm + bowl radius ~7.5cm ~= 11cm, so
+    # 12.5cm centre-to-centre keeps the cube body fully OUTSIDE the bowl wall). The previous loop could EXHAUST
+    # its tries on an unlucky/infeasible draw and SILENTLY ship a still-overlapping cube -> the firm solver
+    # ejected it off the (ground-plane-less) table -> a 6m garbage waypoint -> the 10x trajectory blowup
+    # (2026-06-19, docs/roadmap.md). FIX: after rejection sampling, CLAMP any still-bad env's cube radially
+    # outward from the bowl to exactly the hard floor (a guaranteed-clear, on-table, correct-side pose) so a
+    # cube can NEVER spawn intersecting the bowl, regardless of luck/feasibility.
+    CLR_HARD = 0.125
+    clr = np.where(rng.rand(N) < 0.8, 0.17, CLR_HARD)
     for _ in range(60):
         bad = np.hypot(cubx - bowx, cuby - bowy) < clr
         if not bad.any():
@@ -64,6 +72,18 @@ def sample_phys_dr(N, rng, lay, spec):
         nb = int(bad.sum())
         cubx[bad] = 0.40 + (rng.rand(nb) - 0.5) * 0.12
         cuby[bad] = sgn[bad] * (0.185 + (rng.rand(nb) - 0.5) * 0.10)
+    # GUARANTEED fallback: push any env STILL inside the hard floor radially out to exactly CLR_HARD. Direction
+    # = bowl->cube (away from the bowl); if the cube sits exactly on the bowl centre, push along the arm side
+    # (+sgn y) so it stays on the object table and on the correct half. This makes a cube-in-bowl spawn -- and
+    # thus the off-table ejection -- impossible by construction.
+    bad = np.hypot(cubx - bowx, cuby - bowy) < CLR_HARD
+    if bad.any():
+        dx, dy = cubx[bad] - bowx[bad], cuby[bad] - bowy[bad]
+        dn = np.hypot(dx, dy)
+        ux = np.where(dn > 1e-6, dx / np.maximum(dn, 1e-6), 0.0)
+        uy = np.where(dn > 1e-6, dy / np.maximum(dn, 1e-6), sgn[bad])   # degenerate: push along the arm side
+        cubx[bad] = bowx[bad] + ux * CLR_HARD
+        cuby[bad] = bowy[bad] + uy * CLR_HARD
     yaw = (rng.rand(N) - 0.5) * np.radians(180)
     mass_shift = ((rng.rand(N, 1) - 0.5) * 0.04).astype(np.float32)
     return dict(side_is_left=side_is_left, sgn=sgn, tabZ=tabZ, bowx=bowx, bowy=bowy,
@@ -374,6 +394,31 @@ def collect(N, seed, data_dir, out_dir):
     root0 = np_(cube.get_pos())
     dist_xy0 = np.stack([np_(e.get_pos())[:, :2] for e in dist_ents], 0) if dist_ents else np.zeros((0, N, 2))
 
+    # ---- DEGENERATE-SETTLE GUARD (root-cause fix for the 2026-06-19 trajectory blowup) ----
+    # If the cube spawned overlapping the bowl wall (the cube-vs-bowl rejection loop can EXHAUST its tries and
+    # ship a still-overlapping pose), the firm solver EJECTS it on settle step 0; with NO ground plane in the
+    # immersive scene it then FREE-FALLS off the table to z=-6m. That garbage settled pos feeds the grasp
+    # waypoints (gc = cube pos), so the home->pre / lift->carry segments span metres -> densify emitted ~5000
+    # steps -> the BatchExecutor padded ALL envs to ~10000 (a 10x, 41-min build + a jerky demo). We detect such
+    # an env here (cube far off its intended on-table spawn, non-finite, or below the table) and (1) CLAMP its
+    # cube pos back to the intended spawn XY at table height so its OWN trajectory is sane (smooth, well-
+    # conditioned IK), and (2) FLAG it ``degenerate`` so the demo is REJECTED (success=False, never shipped):
+    # a demo grasping at a phantom cube location is not valid training data regardless of where it lands.
+    spawn_xy = np.stack([cubx, cuby], 1)                          # the cube's INTENDED on-table spawn XY
+    off_xy = np.linalg.norm(root0[:, :2] - spawn_xy, axis=1)      # how far the settled cube drifted in XY
+    cube_floor = tabZ - 0.05                                      # a settled cube can't be below the table top
+    degenerate = (~np.isfinite(root0).all(axis=1)) | (off_xy > 0.05) | (root0[:, 2] < cube_floor) \
+        | (root0[:, 2] > tabZ + 0.30)
+    if degenerate.any():
+        bad = np.where(degenerate)[0]
+        print(f"[COLLECT] DEGENERATE settle in {len(bad)}/{N} env(s) {list(bad)} "
+              f"(cube ejected off table -> demo REJECTED, waypoints clamped): "
+              f"offXY={np.round(off_xy[bad], 3).tolist()} z={np.round(root0[bad, 2], 3).tolist()}", flush=True)
+        # clamp the bad envs' cube pos to a SANE on-table pose so densify/IK stay well-behaved for those envs
+        root0[bad, 0] = cubx[bad]
+        root0[bad, 1] = cuby[bad]
+        root0[bad, 2] = tabZ[bad] + spec.scaled_extents()[2] / 2 + 0.002
+
     # ---- per-env grasp + GENTLE top-down place plan (RoboLab skills + SODA IK) ----
     _, heqL = robot.ee_pose("left"); _, heqR = robot.ee_pose("right")
     htR = {"left": tool_R_at_home(_R_from_wxyz(np_(heqL)[0])), "right": tool_R_at_home(_R_from_wxyz(np_(heqR)[0]))}
@@ -511,7 +556,7 @@ def collect(N, seed, data_dir, out_dir):
     # through-wall metric above stays (a useful task-specific check) but THIS detector is the gate. ----
     pen_mm = pen_tracker.depth_mm()                                # (N,) worst-ever penetration depth in mm
     penetrating = pen_tracker.abnormal(ABNORMAL_THRESH_M)          # (N,) bool: exceeds the abnormal threshold
-    placed = placed & ~penetrating                                # an abnormally penetrating demo is NOT clean
+    placed = placed & ~penetrating & ~degenerate                  # penetrating OR degenerate-settle => NOT clean
     worst_e = int(np.argmax(pen_mm))
     print(f"[COLLECT] penetration: max={float(pen_mm.max()):.1f}mm "
           f"(thresh={ABNORMAL_THRESH_M*1000:.0f}mm), abnormal={int(penetrating.sum())}/{N}"
@@ -570,6 +615,9 @@ def collect(N, seed, data_dir, out_dir):
             # above, so the success_only LeRobot export drops it; this poisoned data is never shipped.
             d.attrs["max_penetration_mm"] = float(pen_mm[e])
             d.attrs["penetrating"] = bool(penetrating[e])
+            # DEGENERATE-SETTLE flag: the cube was ejected off the table at spawn (overlapping bowl) -> the
+            # grasp targets a phantom location -> demo REJECTED (success already forced False above).
+            d.attrs["degenerate"] = bool(degenerate[e])
             d.attrs["hdr"] = os.path.basename(stage.hdrs[e])
             d.attrs["has_distractors"] = bool(has_dist[e])     # 50/50 per-env: was this a cluttered trial?
             d.attrs["distractors"] = ",".join(dist_names) if has_dist[e] else ""

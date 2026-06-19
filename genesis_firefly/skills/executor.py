@@ -28,7 +28,7 @@ class BatchExecutor:
     """Densify + batch-execute per-env EE waypoints with the smooth RoboLab motion profile."""
 
     def __init__(self, scene, robot, side_is_left, *, lin_speed=0.13, ang_speed=1.2, dt=0.01,
-                 dwell_steps=80, min_move_steps=12, rec_every=10, ik_every=2):
+                 dwell_steps=80, min_move_steps=12, max_move_steps=600, rec_every=10, ik_every=2):
         self.scene, self.robot = scene, robot
         self.left = np.asarray(side_is_left, bool)
         self.li = np.where(self.left)[0]
@@ -40,8 +40,10 @@ class BatchExecutor:
         # the arm only every ``ik_every`` control steps (zero-order-hold the joint target between) -- the
         # PD low-passes the staircase. Grip + physics still update EVERY step. ~ik_every x fewer IK calls.
         self.ik_every = max(1, int(ik_every))
+        # max_move_steps HARD-caps any single densified segment so a DEGENERATE waypoint (e.g. a cube
+        # ejected off the table -> a 6 m target) can't 10x the common padded length T (2026-06-19 bug).
         self._dk = dict(lin_speed=lin_speed, ang_speed=ang_speed, dt=dt,
-                        dwell_steps=dwell_steps, min_move_steps=min_move_steps)
+                        dwell_steps=dwell_steps, min_move_steps=min_move_steps, max_move_steps=max_move_steps)
 
     def plan(self, waypoints):
         """Densify each env's waypoint list, pad (hold-last) to a common T.

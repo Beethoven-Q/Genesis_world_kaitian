@@ -63,7 +63,11 @@ convex hulls** tiling the wall+floor; convex-vs-convex contact is robust **every
 
 **The cube is spawned CLEAR of the bowl** — a cube can never start embedded in a bowl in reality. The DR
 rejection-samples the cube xy until `hypot(cube − bowl) ≥ 0.125` (see §2). The cube spawns ~1cm above the
-table and settles during `settle_home`.
+table and settles during `settle_home`. **GUARANTEED (2026-06-19 fix):** the rejection loop used to be able to
+*exhaust* its tries on an unlucky/infeasible draw and silently ship a still-overlapping cube — the firm solver
+then **ejected** it off the (ground-plane-less) table to z≈−6 m, whose garbage settled pose blew the grasp
+trajectory up to 10× (see roadmap). The loop now **clamps** any still-overlapping cube radially outward to
+exactly the 0.125 floor, so a cube can NEVER spawn intersecting the bowl by construction.
 
 ### 1b. The skill: orientation-aware grasp + gentle top-down place
 
@@ -108,6 +112,20 @@ ee_link pose with `TOOL_IN_EE_INV` (the measured ~11cm ee-link-behind-claws offs
 joint-interpolated with a smoothstep ease `ease(u)=3u²−2u³`; the gripper scalar is interpolated and mirrored
 to the mimic claw (`GR100_MIMIC * g`).
 
+- **Densify step-count CAP (`max_move_steps=600`, 2026-06-19).** Because `gc = root0` (the *settled* cube pose),
+  a cube that settled wrong (e.g. ejected off the table) makes the `home→pre` / `lift→carry` segments span
+  metres, and `densify`'s per-segment count `n = max(lin/speed, ang/ang_speed)/dt` is then huge (~5000 steps for
+  6.5 m). Since `BatchExecutor` pads EVERY env to the common max length T, ONE such env 10×'d the whole build.
+  `skills/trajectory.py:densify` now HARD-caps `n` at `max_move_steps` (default 600 ≈ 6 s, well above the ~540 a
+  real 0.7 m workspace move needs), threaded through `BatchExecutor`. Normal moves are unchanged; a degenerate
+  waypoint simply can't dominate T. (Layer 1 of a 3-layer defense — see roadmap 2026-06-19.)
+- **Degenerate-settle guard + REJECT (2026-06-19).** Right after `root0 = cube.get_pos()`, the task flags any env
+  whose settled cube is non-finite, drifted >5 cm in XY from its intended spawn, or off the table in z as
+  `degenerate`: it **clamps** that env's `root0` back to a sane on-table pose (so its own motion + IK stay
+  well-conditioned) AND forces `success=False` (a demo grasping at a phantom location never ships; HDF5 attr
+  `degenerate`). This is Layer 2; Layer 3 is the spawn-clear clamp in §1a / §2a that prevents the ejection at the
+  source. The clean fix is the spawn clamp; the cap + guard are belt-and-braces for any future degenerate source.
+
 ---
 
 ## 2. Full domain randomization
@@ -123,7 +141,7 @@ the **stage**, baked per build-batch / per env). All N envs run in one build.
 | **object-table height** | `tabZ = ho + (rng−0.5)*0.10` (`ho` = `lay.object_table_height` = 0.25; **arm table fixed**) | ±5cm |
 | **bowl xy** | `bowx = 0.40 + (rng−0.5)*0.10`; `bowy = sgn*(0.05 + (rng−0.5)*0.07)` (bowl on the active arm's side) | x ±5cm, y ±3.5cm |
 | **cube xy** | `cubx = 0.40 + (rng−0.5)*0.12`; `cuby = sgn*(0.185 + (rng−0.5)*0.10)` | x ±6cm, y ±5cm |
-| **cube spawn-clear** | reject-sample (≤40 tries) until `hypot(cube − bowl) ≥ 0.125` | never embedded in the bowl |
+| **cube spawn-clear** | reject-sample (≤60 tries) until `hypot(cube − bowl) ≥ clr` (clr=0.17 ~80%, 0.125 ~20%), THEN **clamp** any still-overlapping cube radially out to the 0.125 floor | never embedded in the bowl — GUARANTEED (the clamp can't fail; 2026-06-19) |
 | **cube yaw** | `yaw = (rng−0.5)*radians(180)` — **full in-plane yaw** about world +Z | ±90° |
 | **cube mass** | `mass_shift = (rng−0.5)*0.04` (kg), via `cube.set_mass_shift(...)` | ±20g around ~75g |
 | **friction** | `robot.entity.set_friction_ratio(0.7 + 0.6*rng)` (per link) | ratio 0.7–1.3 |
