@@ -156,6 +156,30 @@ Cameras/rendering: 4 Nyx path-traced sensors at `RES=(320,180)`, `SPP` (default 
 attached to `left_link_6` / `right_link_6`). `stage.render()` reads them via the **sensor API** (`cam._stale=True;
 cam.read().rgb`) so the wrist cams re-attach to link_6 each frame (true egocentric).
 
+### 2c. Distractor / clutter objects (scope-B REQUIRED) — 2–3 irrelevant objects per trial
+
+Every trial spawns **2–3 random irrelevant objects** on the OBJECT table in open areas (so the policy learns to
+pick the **correct** object among lookalikes AND to **not swipe** the others → native collision-avoidance in the
+data). Helpers in `tasks/pickplace.py`:
+
+- **Pool** (`DISTRACTOR_POOL`): `{pen, banana, apple, tennis_ball, book}` from the REGISTRY — each renders with a
+  realistic colour/size/mass/friction. USD-sourced objects (apple/banana/pen) render via their **Nyx-safe
+  extracted `*_clean.obj`** mesh (the textured USDs segfault Nyx, same as the bowl).
+- **Per-build = TYPES** (`choose_distractor_types`, drawn with `stage.rng` BEFORE `build()`): K∈{2,3} distinct
+  types, **at most one large/long object** (banana/book) so all fit on the table out of the arm path.
+- **Per-env = POSES** (`sample_distractor_poses`, batched): each object's XY + in-plane yaw per env.
+- **Corridor-clearance rule** (the key constraint — the executor does NO obstacle avoidance, so this is how the
+  trajectory stays collision-free): every distractor's whole footprint (circumscribed radius → valid at any yaw)
+  is kept clear of the **cube**, the **bowl**, the **cube→bowl carry tube**, the **bowl→home return tube**, the
+  **near-seam strip**, and the **active-arm home**, plus pairwise spacing (no stacking). Placement = a fine
+  anchor grid → greedily pick K mutually-spaced, corridor-clear cells (biased to the opposite-y open area).
+- **Physics:** real collidable rigid bodies (firm friction; single-convex-hull collider since they're never
+  grasped) settled with the cube/bowl; their **CoM is shifted down** so a curved banana rests stably (doesn't
+  slowly roll).
+- **Not-knocked gate:** the task measures each distractor's settled→final XY displacement and prints it; verified
+  **≤ 1.2 cm, 100 % under 2 cm** across seeds while parity stays 8/8. `DIST_DEBUG=1` adds a per-distractor +
+  per-phase trace. See `domain_randomization.md` (distractor subsection, ✅ IMPLEMENTED).
+
 ---
 
 ## 3. Success + penetration scoring (per-env, after the trial)

@@ -80,3 +80,27 @@ phase lands. Requirements live in [project_overview.md](project_overview.md) (bl
   `pickplace.py 8 13` → **8/8 grasped, 8/8 placed, 0 through-wall, max|dq|=0.027 rad** — collection unbroken. See
   `rendering_and_livery.md` §8 (Box-UV gotcha + the Plane `uvScale` tiling math) +
   `domain_randomization.md` (scope-A row now ✅).
+- **2026-06-19 — DISTRACTOR / CLUTTER OBJECTS (scope-B REQUIRED feature).** *Problem:* the DR spec requires every
+  task to spawn 2–3 random irrelevant objects on the table (so the policy learns visual disambiguation + native
+  collision-avoidance), but pickplace had only the cube+bowl — a clean single-object scene that teaches neither.
+  *Change* (`tasks/pickplace.py`): `DISTRACTOR_POOL = {pen, banana, apple, tennis_ball, book}`;
+  `choose_distractor_types` (per-build: K∈{2,3} distinct types, **≤1 large/long object** so they fit);
+  `sample_distractor_poses` (per-env XY+yaw via a fine **anchor-grid + greedy mutually-spaced** assignment that
+  keeps each object's whole footprint clear of the cube / bowl / cube→bowl carry tube / bowl→home return tube /
+  near-seam strip / active-arm home, biased to the opposite-y open area); `spawn_distractors` +
+  `_spawn_distractor_entity` (real collidable rigid bodies). Added `book` to the REGISTRY + extracted **Nyx-safe
+  `*_clean.obj`** visual meshes for apple/banana/pen (the textured USDs **segfault Nyx**, same root cause as the
+  bowl — `scripts/temp/extract_clean_objs.py`). *Why placement, not a planner change:* the executor is pure
+  waypoint-IK with NO obstacle avoidance, so collision-freeness is achieved by **placing distractors out of the
+  swept corridor** (rejection/greedy-grid) — exactly what the spec's rejection-sampling prescribes; this bakes
+  obstacle-avoidance into the data for free without touching the (locked) motion path. *Two real bugs found +
+  fixed:* (1) a long banana centred near the far edge **tipped off** → inset every bound by the object's
+  circumscribed footprint radius (valid at any yaw); (2) a curved banana **slowly rolled ~3 cm** over the episode
+  (intrinsic metastability, NOT an arm knock — proven by a monotonic per-phase displacement trace with the arm on
+  the opposite side) → **lowered the distractor CoM** so it self-rights + rests stably (a single convex-hull
+  collider + longer settle also help). *Result:* over seeds **6 / 17 / 23 / 42 / 103** (8 envs each, incl. K=3
+  with banana): **8/8 grasped, 8/8 placed, 0 through-wall**, and the collision-free gate **max distractor XY
+  displacement ≤ 1.2 cm, 100 % under 2 cm, none knocked** (`pickplace.py 8 17` → 8/8/8/0, max disp 0.18 cm).
+  Offline placement verified over **1500 seeds**: 0 corridor violations, all on-table, no stacking. Preview:
+  `output/temp/distractors_preview.png` (four-view, K=3 banana+apple+pen) + `distractors_third.png`. See
+  `domain_randomization.md` (distractor subsection now ✅).

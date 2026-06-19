@@ -27,6 +27,10 @@ class ObjectSpec:
     extents: tuple                  # local AABB size (ex,ey,ez) at scale=1, MEASURED
     local_center: tuple = (0.0, 0.0, 0.0)
     usd_subpath: str | None = None  # under assets/objects/ (for source="usd")
+    mesh_subpath: str | None = None  # Nyx-SAFE clean .obj (under assets/objects/) extracted from the USD; used
+    #                                  for rendering distractors (Nyx SEGFAULTS on the textured USD material bind)
+    dist_color: tuple | None = None  # realistic flat colour for the clean-mesh distractor render (USD texture is
+    #                                  lost when extracting the OBJ); None -> fall back to `color`
     scale: float = 1.0
     elongated: bool = False         # True -> close ACROSS the long axis (banana/pen)
     is_cube: bool = False           # True -> orientation-aware face-pair grasp
@@ -65,15 +69,18 @@ class ObjectSpec:
 
 
 # ============================================================================ #
-# THE REGISTRY  (geometry MEASURED in RoboLab, 2026-06-17; tennis_ball added 2026-06-18 for the Genesis gate)
+# THE REGISTRY  (geometry MEASURED in RoboLab, 2026-06-17; tennis_ball added 2026-06-18 for the Genesis gate;
+#                book added + Nyx-safe clean .obj meshes (apple/banana/pen) added 2026-06-19 for distractors)
 # ============================================================================ #
 REGISTRY: dict[str, ObjectSpec] = {
     "apple": ObjectSpec(
         name="apple", language_name="apple", source="usd", usd_subpath="objaverse/apple_02.usd",
+        mesh_subpath="objaverse/apple_clean.obj", dist_color=(0.80, 0.12, 0.10),
         mass=0.050, extents=(0.0702, 0.0754, 0.0733), local_center=(0.0, 0.0, 0.0),
         elongated=False, x_range=(0.34, 0.44), place_xy_tol_cm=7.0),
     "banana": ObjectSpec(
         name="banana", language_name="banana", source="usd", usd_subpath="ycb/banana.usd",
+        mesh_subpath="ycb/banana_clean.obj", dist_color=(0.92, 0.80, 0.15),
         mass=0.080, extents=(0.1089, 0.1784, 0.0367), local_center=(0.0, 0.0, 0.0),
         elongated=True, local_long_axis=(0.3372, 0.9414, 0.0), grasp_dz=0.0, x_range=(0.34, 0.44),
         place_xy_tol_cm=9.0),
@@ -82,6 +89,7 @@ REGISTRY: dict[str, ObjectSpec] = {
     # settles in the bowl instead of rolling off the rim.
     "pen": ObjectSpec(
         name="pen", language_name="pen", source="usd", usd_subpath="ycb/dry_erase_marker.usd",
+        mesh_subpath="ycb/dry_erase_marker_clean.obj", dist_color=(0.10, 0.10, 0.12),
         mass=0.020, extents=(0.0210, 0.1208, 0.0189), local_center=(0.0, 0.0, 0.0),
         elongated=True, local_long_axis=(-0.0303, 0.9995, 0.0), grasp_dz=0.0, rest_offset=0.004,
         release_dz=0.03, x_range=(0.34, 0.44), place_xy_tol_cm=9.0),
@@ -95,4 +103,11 @@ REGISTRY: dict[str, ObjectSpec] = {
         name="tennis_ball", language_name="tennis ball", source="sphere", mass=0.057,
         extents=(0.067, 0.067, 0.067), local_center=(0.0, 0.0, 0.0), elongated=False,
         color=(0.85, 0.95, 0.20), friction=(1.1, 1.0), x_range=(0.34, 0.44), place_xy_tol_cm=7.0),
+    # book: a flat hardcover (~18x13x3 cm, ~0.30 kg). Procedural box with a realistic dark-red cover colour;
+    # high friction so it rests flat and is hard to nudge. Used as a clutter/distractor (not a grasp target
+    # in pick-place), so no elongated/cube grasp hints are needed. NEW 2026-06-19 for the distractor pool.
+    "book": ObjectSpec(
+        name="book", language_name="book", source="cuboid", mass=0.300,
+        extents=(0.18, 0.13, 0.03), local_center=(0.0, 0.0, 0.0), elongated=False,
+        color=(0.45, 0.10, 0.12), friction=(1.2, 1.0), x_range=(0.34, 0.44), place_xy_tol_cm=8.0),
 }

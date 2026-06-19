@@ -87,7 +87,7 @@ photoreal quality, and SIZE/object-type variety (only achievable this way). HDRI
 - **Edge cases are welcome**: because we collect in parallel, we can be **open to hard edge cases** (they
   produce hard/failure data); explore ranges in advance only enough to keep success usable.
 
-### Distractor / clutter objects (REQUIRED for every task)
+### Distractor / clutter objects (REQUIRED for every task) — ✅ IMPLEMENTED (cube→bowl; 2026-06-19)
 A real table is never empty except for the target. So **every task spawns 2–3 RANDOM irrelevant objects** on the
 table in OPEN areas, with **realistic physics + collision** (they rest, can be bumped, are solid):
 - **Pool:** drawn from the object library — e.g. for cube→bowl, distractors ∈ {pen, banana, apple, tennis ball,
@@ -100,6 +100,29 @@ table in OPEN areas, with **realistic physics + collision** (they rest, can be b
 - **Why:** the policy must (a) pick the **correct** object among lookalikes (visual disambiguation) and (b) not
   swipe the others (collision avoidance). Clean single-object scenes teach neither.
 - **Applies to ALL tasks** (not just pick-place), scaled to the task's geometry.
+
+> **How it's implemented** (`tasks/pickplace.py`: `DISTRACTOR_POOL`, `choose_distractor_types`,
+> `sample_distractor_poses`, `spawn_distractors`, `_spawn_distractor_entity`).
+> - **Pool:** `{pen, banana, apple, tennis_ball, book}` from the REGISTRY (`registry/object_spec.py`). Each
+>   renders realistically (apple red, banana yellow, pen dark, tennis ball yellow-green, book dark-red).
+> - **Per-build = which TYPES** (entities are created before `scene.build()`): `choose_distractor_types` draws
+>   K∈{2,3} distinct types with `stage.rng` (WITHOUT replacement → varied lookalikes); **at most ONE large/long
+>   object (banana/book)** per build so all fit on the table out of the arm path.
+> - **Per-env = POSES** (batched): `sample_distractor_poses` chooses each object's XY + in-plane yaw per env.
+> - **Corridor-clearance rule (the key constraint):** the planner is pure waypoint-IK (no obstacle avoidance),
+>   so collision-freeness is achieved by **PLACEMENT** — each distractor's whole footprint (circumscribed
+>   radius, valid at any yaw) is kept clear of the **cube**, the **bowl**, the **cube→bowl carry tube**, the
+>   **bowl→home return tube**, the **near-seam strip**, and the **active arm's home**, plus pairwise spacing so
+>   nothing stacks. Placement = a fine anchor grid → greedily pick K mutually-spaced, corridor-clear cells
+>   (favouring the opposite-y side from the active arm). On-table + corridor-clear + non-overlap verified
+>   over 1500 seeds (0 corridor violations).
+> - **Physics:** real collidable rigid bodies (USD objects render via Nyx-safe extracted `*_clean.obj` meshes —
+>   the textured USDs segfault Nyx, same as the bowl), firm friction, settled with the cube/bowl; their CoM is
+>   shifted **down** so a curved banana rests stably instead of slowly rolling.
+> - **Not-knocked verification (the gate):** the task measures each distractor's XY displacement from its
+>   settled pose to its final pose. **Verified across seeds 6/17/23/42/103 (8 envs each): max distractor
+>   displacement ≤ 1.2 cm, 100% under 2 cm, none knocked**, while parity stayed 8/8 grasped+placed, 0
+>   through-wall. Set `DIST_DEBUG=1` to print per-distractor displacement + a per-phase trace.
 
 ## Scope C — Visual background  (AUTOMATIC for every task)
 

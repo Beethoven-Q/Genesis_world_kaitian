@@ -30,6 +30,18 @@ simulator with **RTX-grade Nyx** photoreal rendering, then generalizes it into t
 ---
 
 ## 0b. Working conventions (every agent, every task — non-negotiable)
+- **COLLISION CORRECTNESS IS FIRST-CLASS (priority #1).** A correct collision model + ZERO abnormal
+  interpenetration is the foundation everything else stands on — abnormal collision/penetration produces weird
+  behavior and **harmful, unphysical data** that poisons training. Rules: (1) what cannot happen in reality must
+  not happen in sim — two solids never interpenetrate under any grip force; (2) a **faithful, accurate
+  penetration detector** monitors + ENFORCES this every demo (flag/reject any demo with abnormal penetration —
+  never ship it); (3) **good collision = hollow stays hollow**: hollow features (mug-handle ring, cup/tip
+  opening, bottle mouth) must have NO collision filling them (convex-**DECOMPOSITION**, not a single hull) — only
+  then can a ring thread onto a branch or a cap seat in an opening; (4) when ANYTHING is weird/buggy, **suspect
+  the collision model first** and check it. (5) Every NEW object gets a verified good collision model BEFORE use
+  (solid never penetrates, hollow stays hollow) — see the object-refiner agent ([agents.md](agents.md)) +
+  [robot_collision_cameras.md](robot_collision_cameras.md) + [lessons_genesis_nyx.md](lessons_genesis_nyx.md).
+  (Owner directive, re-emphasized 2026-06-19.)
 - **Maintain `docs/roadmap.md`** — a living problem→change→why→result log. Append a dated entry whenever you fix
   a real problem, change a contract, or make a non-obvious decision. This is how we trace back what we did.
 - **2×2 four-view preview tile** for every collection (see §7). **Storage:** smoke → `output/`; full collections
