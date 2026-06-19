@@ -43,17 +43,23 @@ def _quat_angle(q0, q1):
 
 def densify(waypoints, *, lin_speed=0.15, ang_speed=1.5, dt=0.01,
             min_move_steps=12, dwell_steps=80):
-    """Densify sparse ``(label, pos, quat_wxyz, grip)`` waypoints into per-control-step samples.
+    """Densify sparse ``(label, pos, quat_wxyz, grip[, speed])`` waypoints into per-control-step samples.
 
     Returns a list of ``(pos[3], quat_wxyz[4], grip, label)``. Each consecutive pair is connected by
-    a straight-line Cartesian segment whose step count is ``max(lin/lin_speed, ang/ang_speed)/dt``
-    (so the EE moves at ~constant speed), eased for a smooth start/stop. A waypoint that only changes
-    the gripper (pose unchanged) becomes a DWELL: hold the pose and ramp the gripper over
-    ``dwell_steps`` so the jaws close/open smoothly instead of snapping.
+    a straight-line Cartesian segment whose step count is ``max(lin/speed, ang/ang_speed)/dt`` (so the
+    EE moves at ~constant speed), eased for a smooth start/stop. A waypoint that only changes the
+    gripper (pose unchanged) becomes a DWELL: hold the pose and ramp the gripper over ``dwell_steps``
+    so the jaws close/open smoothly instead of snapping.
+
+    An optional 5th element on a waypoint sets the LINEAR speed of the segment LEAVING it (e.g. a fast
+    free-space approach into the pre-grasp, while the fine manipulation segments stay at ``lin_speed``).
     """
-    wps = [(l, np.asarray(p, float), np.asarray(q, float), float(g)) for (l, p, q, g) in waypoints]
+    def _unpack(w):
+        s = float(w[4]) if len(w) > 4 and w[4] is not None else None
+        return (w[0], np.asarray(w[1], float), np.asarray(w[2], float), float(w[3]), s)
+    wps = [_unpack(w) for w in waypoints]
     out: list = []
-    for (l0, p0, q0, g0), (l1, p1, q1, g1) in zip(wps[:-1], wps[1:]):
+    for (l0, p0, q0, g0, s0), (l1, p1, q1, g1, s1) in zip(wps[:-1], wps[1:]):
         lin = float(np.linalg.norm(p1 - p0))
         ang = _quat_angle(q0, q1)
         if lin < 1e-4 and ang < 1e-3:                       # pure gripper move -> dwell ramp
@@ -61,7 +67,8 @@ def densify(waypoints, *, lin_speed=0.15, ang_speed=1.5, dt=0.01,
             for u in us:
                 out.append((p1.copy(), q1.copy(), g0 + (g1 - g0) * float(u), l1))
             continue
-        n = max(min_move_steps, int(np.ceil(max(lin / lin_speed, ang / ang_speed) / dt)))
+        spd = s0 if s0 is not None else lin_speed           # per-waypoint speed override for this segment
+        n = max(min_move_steps, int(np.ceil(max(lin / spd, ang / ang_speed) / dt)))
         e = ease(np.linspace(0.0, 1.0, n + 1)[1:])
         pos = p0[None] + (p1 - p0)[None] * e[:, None]
         quat = _slerp(q0, q1, e)

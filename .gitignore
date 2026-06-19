@@ -162,3 +162,6 @@ genesis_firefly/**/temp/
 genesis_firefly/**/*.mp4
 genesis_firefly/**/*.npz
 genesis_firefly/**/*.hdf5
+
+# Nyx render cache
+__nyx_cache__/

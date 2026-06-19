@@ -49,6 +49,7 @@ LIGHTS = [{"dir": (-0.4, 0.3, -0.85), "color": (1, 1, 1), "intensity": 1.2, "dir
 _BG_DIR = "/home/kaitianchao/Projects/RoboLab_firefly/assets/backgrounds"
 _HDRS_2K = sorted(glob.glob(f"{_BG_DIR}/indoors/*.hdr") + glob.glob(f"{_BG_DIR}/outdoors/*.hdr"))
 HDR_1K = "/data3/hdr1k"
+MAX_2K_ENVS = 45   # Nyx fits ~50-60 2K env maps before segfault; <= this -> original 2K, else -> 1K pool
 
 
 def hdr_pool(n_target=140):
@@ -68,6 +69,18 @@ def hdr_pool(n_target=140):
             if im is not None:
                 cv2.imwrite(o, cv2.resize(im, (1024, 512), interpolation=cv2.INTER_AREA))
     return sorted(glob.glob(f"{HDR_1K}/*.hdr"))
+
+
+def valid_2k_pool():
+    """The ORIGINAL 2K HDRIs, filtered to those that VALIDATE — a malformed .hdr that cv2 can't read (and that
+    SEGFAULTS Nyx when loaded as an env map) has no 1K cache entry, so we exclude it. Keeps full 2K resolution
+    for build-batches (few env maps) while dropping the bad file(s). Builds the validation cache if missing."""
+    ok = {os.path.basename(p) for p in glob.glob(f"{HDR_1K}/*.hdr")}
+    if not ok:                                                 # cache not built yet -> build it (validates)
+        hdr_pool()
+        ok = {os.path.basename(p) for p in glob.glob(f"{HDR_1K}/*.hdr")}
+    valid = [p for p in _HDRS_2K if os.path.basename(p) in ok]
+    return valid or _HDRS_2K
 
 
 # ---- table-colour DR (the environment visual DR the stage owns) -------------------------------------------
@@ -100,8 +113,10 @@ class ManipulationStage:
         from gs_nyx_plugin.nyx_camera_options import NyxCameraOptions
         from gs_nyx import nyx_py_sdk as nps
 
-        # per-env background: one random 1K HDRI per env (immersive room + image-based light)
-        pool = hdr_pool()
+        # per-env background: a different HDRI per env (immersive room + image-based light). Restore the
+        # original 2K HDRIs when the build has few envs (build-batches); fall back to the 1K pool only for a
+        # single large build (Nyx SEGFAULTS past ~50-60 2K env maps; 1K fits 100).
+        pool = valid_2k_pool() if (self.n_envs <= MAX_2K_ENVS and not os.environ.get("HDR1K")) else hdr_pool()
         self.hdrs = [pool[i] for i in self.rng.choice(len(pool), self.n_envs, replace=len(pool) < self.n_envs)]
         emaps = []
         for hp in self.hdrs:
@@ -135,9 +150,11 @@ class ManipulationStage:
                      lookat=(0.30, 0.0, 0.34), fov=48, **nc)),       # low cam -> the room shows behind the arm
             "cam_side": self.scene.add_sensor(NyxCameraOptions(res=res, pos=tuple(SIDE[0]), lookat=(0.40, 0.0, 0.28),
                         fov=SIDE_VFOV, **nc)),
-            "cam_lw": self.scene.add_sensor(NyxCameraOptions(res=res, fov=WRIST_VFOV, entity_idx=eidx,
+            # wrist cams sit ~5cm from the gripper -> the default 0.1m near plane CLIPS the near finger
+            # geometry (looked transparent). near=0.01 so the close fingers render solid. (side/third keep 0.1)
+            "cam_lw": self.scene.add_sensor(NyxCameraOptions(res=res, fov=WRIST_VFOV, near=0.01, entity_idx=eidx,
                       link_idx_local=self._link_local("left_link_6"), offset_T=_T(*LEFT_WRIST), **nc)),
-            "cam_rw": self.scene.add_sensor(NyxCameraOptions(res=res, fov=WRIST_VFOV, entity_idx=eidx,
+            "cam_rw": self.scene.add_sensor(NyxCameraOptions(res=res, fov=WRIST_VFOV, near=0.01, entity_idx=eidx,
                       link_idx_local=self._link_local("right_link_6"), offset_T=_T(*RIGHT_WRIST), **nc)),
         }
 

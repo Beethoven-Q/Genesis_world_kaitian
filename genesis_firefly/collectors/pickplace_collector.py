@@ -32,6 +32,7 @@ from robots.firefly_dual import GR100_OPEN, GR100_CLOSE, GR100_MIMIC  # noqa: E4
 from robots.ik import TOOL_IN_EE_INV, tool_R_at_home  # noqa: E402
 from skills.grasp import (world_long_axis, orientation_aware_grasp_quat, tilted_base_quat,
                           transport_quats, _R_from_wxyz, _wxyz_from_R)  # noqa: E402
+from skills.executor import BatchExecutor  # the ONE smooth motion path (densify + batch IK)  # noqa: E402
 from object_spec import REGISTRY  # noqa: E402
 import imageio.v3 as iio  # noqa: E402
 import cv2  # noqa: E402
@@ -51,8 +52,12 @@ def sample_phys_dr(N, rng, lay, spec):
     bowy = sgn * (0.05 + (rng.rand(N) - 0.5) * 0.07)
     cubx = 0.40 + (rng.rand(N) - 0.5) * 0.12
     cuby = sgn * (0.185 + (rng.rand(N) - 0.5) * 0.10)
-    for _ in range(40):                                       # a cube can never start inside a bowl in reality
-        bad = np.hypot(cubx - bowx, cuby - bowy) < 0.125
+    # keep the cube CLEAR of the bowl so the open gripper doesn't bump the bowl on the grasp descent. The
+    # MAJORITY (~80%) get a generous clearance; a MINORITY (~20%) are allowed close (hard edge cases -> useful
+    # recovery data, per the DR "accept hard edge cases" rule). The 0.125 floor still forbids cube-in-bowl.
+    clr = np.where(rng.rand(N) < 0.8, 0.17, 0.125)
+    for _ in range(60):
+        bad = np.hypot(cubx - bowx, cuby - bowy) < clr
         if not bad.any():
             break
         nb = int(bad.sum())
@@ -145,40 +150,58 @@ def collect(N, seed, data_dir, out_dir):
         ee_R = np.einsum("nij,jk->nik", Rt, TOOL_IN_EE_INV[:3, :3])
         ee_quat = np.stack([_wxyz_from_R(R) for R in ee_R])
         idx = armdof["left"] if link is ee["l"] else armdof["right"]
-        q = np_(robot.entity.inverse_kinematics(link=link, pos=ee_pos.astype(np.float32),
-                quat=ee_quat.astype(np.float32), dofs_idx_local=idx, max_solver_iters=24, return_error=False))
+        # Pin the solve to the WARM-STARTED branch. Genesis defaults max_samples=50: when the warm start
+        # (current qpos) fails to converge in the iter budget -- which happens during a big wrist/elbow
+        # reorientation -- it RANDOM-restarts up to 50x over the full joint range and returns whatever branch
+        # converges first (an elbow/wrist-FLIPPED solution). The executor then PD-drives across the branch jump
+        # in one step -> the visible wrist SNAP. max_samples=1 never leaves the warm start; a smaller
+        # max_step_size + a little DLS damping keep each solve C0-continuous and singularity-robust. (Verified
+        # against genesis .../rigid/abd/inverse_kinematics.py: the resample block is gated on i_sample<max_samples-1.)
+        q = np_(robot.entity.inverse_kinematics(
+                link=link, pos=ee_pos.astype(np.float32), quat=ee_quat.astype(np.float32), dofs_idx_local=idx,
+                max_solver_iters=30, max_samples=1, max_step_size=0.2, damping=0.05, return_error=False))
         return q[:, idx]
 
     gc = root0.copy(); gc[:, 2] += spec.grasp_dz
     tz = np.stack([_R_from_wxyz(q) @ [0, 0, 1.0] for q in gq])
     drop_z = tabZ + 2 * BOWL_HALF_H + spec.scaled_extents()[2] / 2 + 0.012   # release ABOVE the rim (gentle)
     bxyz = np.stack([bowx, bowy, drop_z], 1).astype(np.float64)
-    APP, LIFT, PAPP = 0.12, 0.20, 0.09
-    WP = [("pre", gc - APP * tz, gq, GR100_OPEN), ("at", gc, gq, GR100_OPEN), ("close", gc, gq, GR100_CLOSE),
-          ("lift", gc + [0, 0, LIFT], cq, GR100_CLOSE), ("carry", bxyz + [0, 0, PAPP], cq, GR100_CLOSE),
-          ("lower", bxyz, cq, GR100_CLOSE), ("hold", bxyz, cq, GR100_CLOSE), ("rel", bxyz, cq, GR100_OPEN),
-          ("ret", bxyz + [0, 0, PAPP], cq, GR100_OPEN)]
-    SEG = [40, 50, 60, 95, 95, 50, 40, 55, 40]
-    wpj = [np.where(side_is_left[:, None], ik(ee["l"], p.astype(np.float64), q), ik(ee["r"], p.astype(np.float64), q))
-           for (_, p, q, _) in WP]
+    APP, LIFT, PAPP = 0.12, 0.18, 0.08   # match RoboLab/plan_pick_place defaults (lower lift = gentler, safe)
+    OPEN, CLOSE = GR100_OPEN, GR100_CLOSE
 
-    def ease(u):
-        return 3 * u * u - 2 * u * u * u
+    # home tool pose per env, so the FIRST move (home->pre) is densified+smooth too (not a PD snap).
+    hposL, hquatL = robot.ee_pose("left"); hposR, hquatR = robot.ee_pose("right")
+    M_te, t_te = TOOL_IN_EE_INV[:3, :3], TOOL_IN_EE_INV[:3, 3]
 
-    traj, grip, labs = [], [], []
-    for i in range(len(WP) - 1):
-        for s in range(SEG[i]):
-            u = ease((s + 1) / SEG[i])
-            traj.append((wpj[i] * (1 - u) + wpj[i + 1] * u).astype(np.float32))
-            grip.append(float(WP[i][3] + (WP[i + 1][3] - WP[i][3]) * u)); labs.append(WP[i + 1][0])
-    T = len(traj)
-    li, ri = np.where(side_is_left)[0], np.where(~side_is_left)[0]
-    print(f"[COLLECT] planned T={T} ({len(li)} left / {len(ri)} right arm)", flush=True)
+    def ee_to_tool(p, q):                                       # inverse of ik()'s tool->ee map
+        Rt = _R_from_wxyz(q) @ M_te.T
+        return p - Rt @ t_te, _wxyz_from_R(Rt)
 
-    # ---- execute + RECORD (states/actions + render 4 Nyx cams every REC_EVERY) ----
-    acts, jpos, jvel, eepos, eequat = [], [], [], [], []
+    # per-env SPARSE EE waypoints for the ACTIVE arm; BatchExecutor densifies each into the gentle
+    # constant-Cartesian-speed motion (a pose held across two waypoints -> a smooth gripper dwell ramp).
+    wps = []
+    for i in range(N):
+        hp, hq = ee_to_tool(hposL[i], hquatL[i]) if side_is_left[i] else ee_to_tool(hposR[i], hquatR[i])
+        wps.append([
+            ("home",  hp,                    hq,    OPEN),        # everything gentle (constant slow speed)
+            ("pre",   gc[i] - APP * tz[i],   gq[i], OPEN),
+            ("at",    gc[i],                 gq[i], OPEN),
+            ("at",    gc[i],                 gq[i], OPEN),
+            ("close", gc[i],                 gq[i], CLOSE),     # pose held -> gripper close ramp + grasp settle
+            ("lift",  gc[i] + [0, 0, LIFT],  cq[i], CLOSE),
+            ("carry", bxyz[i] + [0, 0, PAPP], cq[i], CLOSE),
+            ("lower", bxyz[i],               cq[i], CLOSE),
+            ("rel",   bxyz[i],               cq[i], OPEN),      # pose held -> gripper release ramp
+            ("ret",   bxyz[i] + [0, 0, PAPP], cq[i], OPEN),
+            ("go_home", hp,                  hq,    OPEN),      # smooth, densified RETURN HOME (recorded in
+        ])                                                     # video + data -> the policy learns to go home
+
+    def solve(p, q):                                           # IK both arms, pick the active one per env
+        return np.where(side_is_left[:, None], ik(ee["l"], p, q), ik(ee["r"], p, q))
+
+    # ---- execute the smooth batch + RECORD (states/actions + render 4 Nyx cams every REC_EVERY) ----
+    acts, jpos, jvel, eepos, eequat, cubez = [], [], [], [], [], []
     cam_steps = {nm: [] for nm in cams}
-    lift_pos = None
     t0 = time.time()
 
     def record_state(full_cmd):
@@ -189,37 +212,29 @@ def collect(N, seed, data_dir, out_dir):
         eq = np.where(side_is_left[:, None], np_(ee["l"].get_quat()), np_(ee["r"].get_quat()))
         eepos.append(ep.copy()); eequat.append(eq.copy())
 
-    for t in range(T):
-        aq = traj[t]; full = home16.copy()
-        for k, d in enumerate(armdof["left"]):
-            full[li, d] = aq[li, k]
-        for k, d in enumerate(armdof["right"]):
-            full[ri, d] = aq[ri, k]
-        g = grip[t]
-        full[li, gdrv["left"]] = g; full[li, gmim["left"]] = GR100_MIMIC * g
-        full[ri, gdrv["right"]] = g; full[ri, gmim["right"]] = GR100_MIMIC * g
-        robot.entity.control_dofs_position(full); stage.scene.step()
-        if labs[t] == "lift":
-            lift_pos = np_(cube.get_pos()).copy()
-        if t % REC_EVERY == 0:
-            record_state(full)
-            views = stage.render()
-            for nm in cams:
-                cam_steps[nm].append(views[nm])
-    for _ in range(40):
-        robot.entity.control_dofs_position(full); stage.scene.step()
-    record_state(full)
-    views = stage.render()
-    for nm in cams:
-        cam_steps[nm].append(views[nm])
-    if lift_pos is None:
-        lift_pos = np_(cube.get_pos())
+    def on_step(t, full, labels_t):
+        record_state(full)
+        views = stage.render()
+        for nm in cams:
+            cam_steps[nm].append(views[nm])
+        cubez.append(np_(cube.get_pos())[:, 2].copy())
+
+    # gentle everywhere: lin 0.13 m/s, ang 0.9 rad/s (slows the wrist reorientation, the flip-prone part);
+    # ik_every=1 so there's no zero-order-hold staircase (cheap now that IK does a single warm-started solve).
+    ex = BatchExecutor(stage.scene, robot, side_is_left, rec_every=REC_EVERY, ang_speed=0.9, ik_every=1)
+    T = ex.run(wps, solve, home16, on_step=on_step, settle_steps=40)
+    lift_pos_z = np.max(np.stack(cubez, 1), axis=1)            # per-env max cube height reached during the run
     wall = time.time() - t0
+    li, ri = np.where(side_is_left)[0], np.where(~side_is_left)[0]
+    # quantitative jerk gate: worst single-step active-arm joint jump. A branch flip = a >1 rad spike on a
+    # wrist joint; after the max_samples=1 fix this should be small (<~0.15 rad).
+    print(f"[COLLECT] executed T={T} ({len(li)} left / {len(ri)} right arm)  render+sim {wall:.1f}s  "
+          f"max per-step |dq|={float(ex.max_dq.max()):.3f} rad", flush=True)
 
     # ---- score + realistic penetration check (per-env bowl centre) ----
     objf = np_(cube.get_pos())
     eep = np.where(side_is_left[:, None], np_(ee["l"].get_pos()), np_(ee["r"].get_pos()))
-    lift_cm = (lift_pos[:, 2] - root0[:, 2]) * 100
+    lift_cm = (lift_pos_z - root0[:, 2]) * 100
     ch2 = spec.scaled_extents()[2] / 2
     rxy = np.hypot(objf[:, 0] - bowx, objf[:, 1] - bowy)
     rim_z = tabZ + 2 * BOWL_HALF_H
