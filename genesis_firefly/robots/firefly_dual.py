@@ -69,7 +69,7 @@ GRIP_KP, GRIP_KV, GRIP_EFFORT = 200.0, 8.0, 10.0   # firm squeeze (verified: rai
 class FireflyDual:
     """Loads the dual-arm robot into a Genesis scene and exposes name->dof maps + a command helper."""
 
-    def __init__(self, scene: "gs.Scene", pos=(0.0, 0.0, BASE_Z), surface=None, **morph_kwargs):
+    def __init__(self, scene: "gs.Scene", pos=(0.0, 0.0, BASE_Z), surface=None, vis_mode=None, **morph_kwargs):
         # COLLISION FIDELITY (root fix for finger<->object penetration): convexify=True alone gives each link a
         # SINGLE convex hull, and Genesis defaults `decompose_robot_error_threshold=inf` -> the curved GR100
         # finger's hull FILLS its concavity, so the (real) visual finger can poke through an object the (fatter,
@@ -87,8 +87,10 @@ class FireflyDual:
         # (no compensation) so it still falls under gravity and must be physically held by the grip.
         add_kw = dict(morph=gs.morphs.URDF(**kw),
                       material=gs.materials.Rigid(gravity_compensation=1.0))
-        if surface is not None:                                   # e.g. vis_mode="collision" for collider checks
+        if surface is not None:
             add_kw["surface"] = surface
+        if vis_mode is not None:                                  # vis_mode="collision" -> render the colliders
+            add_kw["vis_mode"] = vis_mode
         self.entity = scene.add_entity(**add_kw)
         self._built = False
 
