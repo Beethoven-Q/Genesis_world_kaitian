@@ -38,6 +38,23 @@ class ObjectSpec:
     friction: tuple = (1.0, 0.9)
     color: tuple = (0.85, 0.15, 0.15)       # visual (procedural cuboid/sphere)
     grasp_dz: float = 0.0           # nudge the grasp point along world +Z from the geometry centre
+    grasp_close: float = 0.9            # driven-claw firm-pinch TARGET (GR100_CLOSE). A ROUNDED/soft body uses a
+    #                                     GENTLER target (e.g. ~0.7) so the high-kp PD doesn't over-drive the claw
+    #                                     into it (the >7mm penetration gate). Keep >= ~0.6 so the empty-close
+    #                                     detector (claw near GR100_MEET=0.58 on a miss) stays valid. 0.9 = cube.
+    grasp_single_hull: bool = False     # GRASP collider = a SINGLE convex hull (smooth envelope) instead of a
+    #                                     coacd decomposition. For a ROUNDED CONVEX body (banana) the smooth hull
+    #                                     pinches cleanly (stable, shallow penetration); a decomposition's internal
+    #                                     seams + the firm pinch over-penetrate -> NaN. Use ONLY for near-convex
+    #                                     bodies (a hollow/handled object MUST stay decomposed to keep its cavity).
+    grasp_decompose_err: float = 0.04   # coacd convex-decomposition error threshold for the GRASP collider (USD
+    #                                     mesh). Lower = more/tighter hulls hugging a rounded body -> the firm
+    #                                     pinch claw can't sink as deep (less grasp penetration). 0.04 = bowl recipe.
+    grasp_center_offset_local: tuple = (0.0, 0.0, 0.0)  # LOCAL-frame XY(Z) shift of the grasp point off the AABB
+    #                                 centre onto the actual BODY -- needed for a CURVED object (a banana's AABB
+    #                                 centre sits in the hollow of the curve, ~3cm off the fruit); the task
+    #                                 rotates this by the object's world yaw and adds it to the grasp centre.
+    #                                 (0,0,0) = grasp at the AABB centre (cube/pen/round -- their body IS centred).
     release_dz: float = 0.05        # height above the bowl centre to open/release (thin pen -> lower)
     contact_offset: float = 0.008   # speculative-contact band
     rest_offset: float = 0.0        # hard contact standoff (thin pen -> 0.004 to stop claw ON the surface)
@@ -84,11 +101,17 @@ REGISTRY: dict[str, ObjectSpec] = {
         mesh_subpath="objaverse/apple_clean.obj", dist_color=(0.80, 0.12, 0.10),
         mass=0.050, extents=(0.0702, 0.0754, 0.0733), local_center=(0.0, 0.0, 0.0),
         elongated=False, x_range=(0.34, 0.44), place_xy_tol_cm=7.0),
+    # banana: CURVED. The AABB centre sits in the HOLLOW of the curve (~3cm off the fruit), so a grasp at the
+    # AABB centre closes on AIR. grasp_center_offset_local shifts the grasp point along the SHORT (closing) axis
+    # onto the banana body (short-proj +0.030 m = the body's centre at the long-axis midpoint, MEASURED from the
+    # clean mesh: at |long|<2cm the body spans short-proj 0.011..0.052). The gripper then closes across the
+    # banana's real ~3.7cm thickness. grasp_dz lifted a touch so the claws bracket the body, not skim the table.
     "banana": ObjectSpec(
         name="banana", language_name="banana", source="usd", usd_subpath="ycb/banana.usd",
         mesh_subpath="ycb/banana_clean.obj", dist_color=(0.92, 0.80, 0.15),
         mass=0.080, extents=(0.1089, 0.1784, 0.0367), local_center=(0.0, 0.0, 0.0),
-        elongated=True, local_long_axis=(0.3372, 0.9414, 0.0), grasp_dz=0.0, x_range=(0.34, 0.44),
+        elongated=True, local_long_axis=(0.3372, 0.9414, 0.0), grasp_dz=-0.006,
+        grasp_center_offset_local=(-0.0282, 0.0101, 0.0), grasp_single_hull=True, x_range=(0.34, 0.44),
         place_xy_tol_cm=9.0),
     # marker pen (dry-erase marker): very elongated, ~2cm thick. rest_offset=0.004 stops the firm claw ON the
     # surface (else it over-drives PAST the thin body and the pen lodges on a finger). release_dz lower so it

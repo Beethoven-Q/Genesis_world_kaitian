@@ -43,6 +43,17 @@ import h5py  # noqa: E402
 REC_EVERY = 10                                                 # record state + render every K sim steps
 BOWL_OBJ = os.path.join(os.path.dirname(_HERE), "assets/objects/ycb/bowl_clean.obj")  # Nyx-safe bowl visual
 
+# ---- CONFIGURABLE TARGET object (the thing that gets picked & placed) -----------------------------------------
+# The SAME task picks ANY registry object as the grasp target. ``TARGET`` (env var) selects it; default ``cube``
+# so ``pickplace.py N seed`` reproduces the cube collection EXACTLY (the regression gate). Switching the target
+# is a small per-object ADAPTATION, not a fork: the orientation-aware grasp (ref-axis: long-axis for elongated,
+# a face-pair for the cube, None for round), the full DR, the 50/50 distractors, the disturbance harness, the
+# penetration gate and go-home are ALL reused unchanged. The only target-specific pieces are (1) which spec we
+# spawn, (2) its ref-axis (already encoded by the spec's elongated/is_cube flags), (3) the spawn-clear floor
+# (derived from the target's footprint so a banana/book never spawns half-in the bowl), and (4) the distractor
+# pool, which EXCLUDES the target's type so the target is never ambiguous among lookalikes.
+TARGET = os.environ.get("TARGET", "cube")
+
 
 # ---- DR-STRATEGIST sweep hooks (docs/agents.md DR strategist + dr/sweep.py) -----------------------------------
 # The DR strategist EXPLORES wider/narrower ranges WITHOUT editing this file: it sets a few env-var multipliers
@@ -74,18 +85,21 @@ def sample_phys_dr(N, rng, lay, spec):
     bowy = sgn * (0.05 + (rng.rand(N) - 0.5) * 0.07 * ps)
     cubx = 0.40 + (rng.rand(N) - 0.5) * 0.12 * ps
     cuby = sgn * (0.185 + (rng.rand(N) - 0.5) * 0.10 * ps)
-    # keep the cube CLEAR of the bowl so the open gripper doesn't bump the bowl on the grasp descent. The
+    # keep the TARGET CLEAR of the bowl so the open gripper doesn't bump the bowl on the grasp descent. The
     # MAJORITY (~80%) get a generous clearance; a MINORITY (~20%) are allowed close (hard edge cases -> useful
-    # recovery data, per the DR "accept hard edge cases" rule). The 0.125 floor still forbids cube-in-bowl.
-    # HARD floor 0.125 forbids cube-in-bowl (the cube circumradius ~3.5cm + bowl radius ~7.5cm ~= 11cm, so
-    # 12.5cm centre-to-centre keeps the cube body fully OUTSIDE the bowl wall). The previous loop could EXHAUST
-    # its tries on an unlucky/infeasible draw and SILENTLY ship a still-overlapping cube -> the firm solver
-    # ejected it off the (ground-plane-less) table -> a 6m garbage waypoint -> the 10x trajectory blowup
-    # (2026-06-19, docs/roadmap.md). FIX: after rejection sampling, CLAMP any still-bad env's cube radially
-    # outward from the bowl to exactly the hard floor (a guaranteed-clear, on-table, correct-side pose) so a
-    # cube can NEVER spawn intersecting the bowl, regardless of luck/feasibility.
-    CLR_HARD = 0.125
-    clr = np.where(rng.rand(N) < 0.8, 0.17, CLR_HARD)
+    # recovery data, per the DR "accept hard edge cases" rule). The hard floor forbids target-in-bowl.
+    # HARD floor: the cube uses the LOCKED 0.125 (cube circumradius ~3.5cm + bowl radius ~7.5cm ~= 11cm, so
+    # 12.5cm centre-to-centre keeps the cube body fully OUTSIDE the bowl wall). A BIGGER target (banana/book,
+    # footprint radius up to ~11cm) needs MORE clearance or its body would still overlap the bowl wall, so for a
+    # non-cube target the floor SCALES with the target footprint: footprint_radius + bowl_radius(0.075) + 1.5cm
+    # margin. (For the cube this formula gives ~0.1254 ~= the locked 0.125, so cube stays byte-for-byte on the
+    # literal.) The previous loop could EXHAUST its tries on an unlucky/infeasible draw and SILENTLY ship a still-
+    # overlapping target -> the firm solver ejected it off the (ground-plane-less) table -> a 6m garbage waypoint
+    # -> the 10x trajectory blowup (2026-06-19, docs/roadmap.md). FIX: after rejection sampling, CLAMP any still-
+    # bad env's target radially outward from the bowl to exactly the hard floor (a guaranteed-clear, on-table,
+    # correct-side pose) so the target can NEVER spawn intersecting the bowl, regardless of luck/feasibility.
+    CLR_HARD = 0.125 if spec.is_cube else float(_footprint_radius(spec) + 0.075 + 0.015)
+    clr = np.where(rng.rand(N) < 0.8, max(0.17, CLR_HARD + 0.045), CLR_HARD)
     for _ in range(60):
         bad = np.hypot(cubx - bowx, cuby - bowy) < clr
         if not bad.any():
@@ -115,8 +129,14 @@ def sample_phys_dr(N, rng, lay, spec):
 # ============================================================================ #
 # DISTRACTOR / CLUTTER OBJECTS  (REQUIRED DR feature, docs/domain_randomization.md scope B)
 # ============================================================================ #
-# Pool of REALISTIC irrelevant objects for the cube->bowl task. They render from their own assets/spec colours
-# (apple red/green, banana yellow, pen, tennis ball yellow-green, book dark-red) and are NEVER the grasp target.
+# Pool of REALISTIC irrelevant objects. They render from their own assets/spec colours (apple red/green, banana
+# yellow, pen, tennis ball yellow-green, book dark-red) and are NEVER the grasp target. The TARGET's own type is
+# EXCLUDED from the pool (per-build, in choose_distractor_types) so the target is never ambiguous among
+# lookalikes -- e.g. when the target is the banana, the clutter is drawn from {pen, apple, tennis_ball, book, cube}.
+DISTRACTOR_UNIVERSE = ["pen", "banana", "apple", "tennis_ball", "book", "cube"]
+# back-compat: the cube-target collection's pool (the cube is the target, so it is not a distractor) -- this is
+# exactly DISTRACTOR_UNIVERSE minus "cube", which is what choose_distractor_types(target="cube") produces, so the
+# cube regression draws the SAME clutter types as before.
 DISTRACTOR_POOL = ["pen", "banana", "apple", "tennis_ball", "book"]
 
 # Geometry of the active arm's swept XY corridor (the planner is pure waypoint-IK with NO obstacle avoidance, so
@@ -148,12 +168,18 @@ SEAM_KEEPOUT_X = 0.30   # forbid the near-seam strip x < this (the arm links + b
 DISTRACTOR_LARGE = {"banana", "book"}
 
 
-def choose_distractor_types(rng, pool=DISTRACTOR_POOL):
+def choose_distractor_types(rng, target="cube", pool=None):
     """PER-BUILD: how many distractors (K in {2,3}) and which TYPES (entities are created before scene.build,
     so the count + identities are fixed for the whole build). Drawn WITHOUT replacement so the K distractors
-    are visually distinct lookalikes (the policy must disambiguate the cube from a varied clutter set). At most
+    are visually distinct lookalikes (the policy must disambiguate the TARGET from a varied clutter set). At most
     ONE large/long object (banana/book) per build so every set fits on the table out-of-corridor with real
-    spacing (the open area can't hold two 18cm objects clear of the arm path)."""
+    spacing (the open area can't hold two 18cm objects clear of the arm path).
+
+    The TARGET's own type is EXCLUDED from the pool so the target is never ambiguous (e.g. a banana target draws
+    clutter from {pen, apple, tennis_ball, book, cube}). For ``target="cube"`` the pool is exactly the legacy
+    ``DISTRACTOR_POOL`` (universe minus cube, same items/order), so the cube collection draws IDENTICAL clutter."""
+    if pool is None:
+        pool = [n for n in DISTRACTOR_UNIVERSE if n != target]
     k = int(rng.choice([2, 3]))
     for _ in range(40):
         names = list(rng.choice(pool, size=k, replace=False))
@@ -301,12 +327,56 @@ def _spawn_distractor_entity(scene, spec, pos_xy, z):
         material=mat, surface=gs.surfaces.Plastic(color=col, roughness=0.5))
 
 
-def spawn_distractors(stage, dr, rng):
+def spawn_target(scene, spec, color, pos_xy=(0.40, 0.18), z=0.30):
+    """Spawn the GRASP TARGET as a real collidable rigid body with a FAITHFUL grasp collider + a Nyx-safe visual.
+    The target is the one object that gets GRASPED, so (unlike a distractor) its USD-mesh collider is a convex
+    DECOMPOSITION (coacd, the same recipe as the bowl), not a single hull, so the gripper closes on the real
+    elongated/flat shape (a banana's curve, a pen's thin body, a book's flat slab) rather than a fat envelope.
+    Procedural cube/sphere keep their exact box/sphere collider (already faithful). The visual is the procedural
+    box/sphere for those sources, or the Nyx-safe clean .obj for USD sources (the textured USD segfaults Nyx, the
+    same reason the bowl + distractors render from clean meshes). ``color`` comes from the stage's distinct-from-
+    table picker so the target stays visible against the randomized table.
+    Returns the entity (its per-env pose/yaw/mass DR is applied by the caller after build, exactly as the cube)."""
+    x, y = pos_xy
+    fr = float(os.environ.get("TGT_FRIC", spec.friction[0]))   # higher friction -> a shallower grip still holds
+    mat = gs.materials.Rigid(rho=_rho_for(spec), friction=fr)
+    if spec.source == "cuboid":
+        # EXACT cube path (byte-for-byte for the regression): procedural box, plastic PBR, the spec's grasp friction.
+        return scene.add_entity(gs.morphs.Box(size=tuple(spec.scaled_extents()), pos=(x, y, z)),
+                                material=gs.materials.Rigid(rho=600.0, friction=1.0),
+                                surface=gs.surfaces.Plastic(color=color, roughness=0.35))
+    if spec.source == "sphere":
+        return scene.add_entity(gs.morphs.Sphere(radius=float(spec.scaled_extents()[0] / 2), pos=(x, y, z)),
+                                material=mat, surface=gs.surfaces.Rough(color=color))
+    # USD object -> grasp collider on the clean mesh + the distinct-from-table colour.
+    # COLLIDER CHOICE (spec.grasp_single_hull):
+    #  * decomposition (default): coacd splits the mesh into solid hulls -> faithful concave shape (needed for a
+    #    hollow/handled object). But for a ROUNDED CONVEX body (banana) the decomposition's internal hull seams +
+    #    the firm high-kp pinch drive the claw DEEP into a seam -> >9mm penetration AND huge constraint forces
+    #    that NaN the Newton solver (verified: dz<=-0.005 banana -> 'Invalid constraint forces' crash).
+    #  * single convex hull (grasp_single_hull=True): a SMOOTH convex envelope of the body. A banana is already
+    #    near-convex, so the hull is a faithful smooth banana the claws pinch CLEANLY -- stable contact, shallow
+    #    penetration, no NaN. This is the SAME stable single-hull collider the distractors use, promoted to the
+    #    grasp target for convex rounded objects.
+    single = os.environ.get("TGT_SINGLE_HULL")
+    single = (single == "1") if single is not None else bool(getattr(spec, "grasp_single_hull", False))
+    if single:
+        return scene.add_entity(
+            gs.morphs.Mesh(file=str(OBJECTS / spec.mesh_subpath), pos=(x, y, z), scale=spec.scale, convexify=True),
+            material=mat, surface=gs.surfaces.Plastic(color=color, roughness=0.5))
+    decomp = float(os.environ.get("TGT_DECOMP", getattr(spec, "grasp_decompose_err", 0.04)))
+    return scene.add_entity(
+        gs.morphs.Mesh(file=str(OBJECTS / spec.mesh_subpath), pos=(x, y, z), scale=spec.scale,
+                       convexify=True, decompose_object_error_threshold=decomp, decimate=False),
+        material=mat, surface=gs.surfaces.Plastic(color=color, roughness=0.5))
+
+
+def spawn_distractors(stage, dr, rng, target="cube"):
     """Create the per-build distractor ENTITIES (called before stage.build()) and return (entities, names,
-    xy, yaw). TYPES are per-build (chosen here with the stage rng); POSES are per-env (placed after build via
-    the returned batched arrays). Each entity is a real collidable rigid body from the REGISTRY (realistic
-    colour/size/mass/friction) and drops+settles with the cube/bowl during the existing settle."""
-    names = choose_distractor_types(rng)
+    xy, yaw). TYPES are per-build (chosen here with the stage rng, EXCLUDING the target type); POSES are per-env
+    (placed after build via the returned batched arrays). Each entity is a real collidable rigid body from the
+    REGISTRY (realistic colour/size/mass/friction) and drops+settles with the target/bowl during the settle."""
+    names = choose_distractor_types(rng, target=target)
     specs = [REGISTRY[nm] for nm in names]
     lay = stage.lay
     ents = []
@@ -335,18 +405,25 @@ def tile(frames, H, W):
     return t
 
 
-def collect(N, seed, data_dir, out_dir):
+def collect(N, seed, data_dir, out_dir, target=None):
     t0 = time.time()
+    target = TARGET if target is None else target
+    if target not in REGISTRY:
+        raise SystemExit(f"unknown TARGET '{target}' (choose from {sorted(REGISTRY)})")
     stage = ManipulationStage(N, seed=seed)                   # the reusable robot+cameras+rendering+env-DR setup
-    lay, spec, rng = stage.lay, REGISTRY["cube"], stage.rng
+    # ``spec`` is the CONFIGURABLE grasp target (default cube; TARGET env var selects any registry object). The
+    # variable below stays named ``cube`` so the ~600 lines of locked grasp/score/disturbance logic that reference
+    # it are unchanged -- it is the TARGET entity, which the orientation-aware grasp handles via spec.ref-axis.
+    lay, spec, rng = stage.lay, REGISTRY[target], stage.rng
+    print(f"[COLLECT] TARGET = {target!r} ({spec.language_name}); source={spec.source} "
+          f"extents={np.round(spec.scaled_extents(), 3).tolist()} "
+          f"ref_axis={'long' if spec.elongated else ('face' if spec.is_cube else 'none(round)')}", flush=True)
     dr = sample_phys_dr(N, rng, lay, spec)
 
-    # --- task objects: a coloured cube + a convex-decomposition bowl, distinct from the table colour ---
+    # --- task objects: the coloured TARGET + a convex-decomposition bowl, distinct from the table colour ---
     ch, cube_col = stage.distinct_object_color()
     _, bowl_col = stage.distinct_object_color(ch)
-    cube = stage.scene.add_entity(gs.morphs.Box(size=tuple(spec.scaled_extents()), pos=(0.40, 0.18, 0.30)),
-                                  material=gs.materials.Rigid(rho=600.0, friction=1.0),
-                                  surface=gs.surfaces.Plastic(color=cube_col, roughness=0.35))
+    cube = spawn_target(stage.scene, spec, cube_col, pos_xy=(0.40, 0.18), z=0.30)   # the TARGET entity
     bowl = stage.scene.add_entity(gs.morphs.Mesh(file=BOWL_OBJ, convexify=True,
                                   decompose_object_error_threshold=0.04, decimate=False),
                                   material=gs.materials.Rigid(rho=400.0, friction=1.0),
@@ -355,7 +432,7 @@ def collect(N, seed, data_dir, out_dir):
     # --- distractor / clutter objects (REQUIRED DR): 2-3 random irrelevant objects on the OBJECT table, in OPEN
     # areas, rejection-sampled OUT of the active arm's swept corridor (grasp + cube->bowl carry + bowl->home).
     # ENTITIES are created here (per-build types); their per-env POSES are applied after build() below. ---
-    dist_ents, dist_names, dist_xy, dist_yaw = spawn_distractors(stage, dr, rng)
+    dist_ents, dist_names, dist_xy, dist_yaw = spawn_distractors(stage, dr, rng, target=target)
     dist_specs = [REGISTRY[nm] for nm in dist_names]
     print(f"[COLLECT] distractors (per-build, K={len(dist_names)}): {dist_names}", flush=True)
 
@@ -417,6 +494,14 @@ def collect(N, seed, data_dir, out_dir):
             e.zero_all_dofs_velocity()
         except Exception:
             pass
+    try:
+        cube.zero_all_dofs_velocity()    # the TARGET too: a curved/round body can be metastable at settle end and
+        #                                  CREEP during the approach so the grasp (planned from the settled pose)
+        #                                  closes where it WAS, not where it IS -> an empty close. Starting it at
+        #                                  true rest removes that creep. (The cube is already at rest, so this is
+        #                                  a no-op for the regression.)
+    except Exception:
+        pass
     root0 = np_(cube.get_pos())
     dist_xy0 = np.stack([np_(e.get_pos())[:, :2] for e in dist_ents], 0) if dist_ents else np.zeros((0, N, 2))
 
@@ -451,6 +536,34 @@ def collect(N, seed, data_dir, out_dir):
     base = {"left": np.array([0.0, 0.224]), "right": np.array([0.0, -0.224])}
     laxis = spec.long_axis_local()
 
+    # GRASP-CENTRE offset (object-specific): for a CURVED object (banana) the AABB centre sits in the hollow of
+    # the curve, so the grasp point is shifted along the SHORT axis onto the body by spec.grasp_center_offset_local
+    # (a LOCAL-frame vector). We rotate it by the object's live world yaw and add it to the root -> the world grasp
+    # centre. For every other object the offset is (0,0,0), so the grasp centre IS the root (the cube path is
+    # unchanged). ``grasp_center_world(root_pos, root_quat)`` maps a LIVE object pose to its grasp centre; it is
+    # re-evaluated whenever the object moves (the disturbance chase/retry re-reads the shoved pose).
+    _GOFF = np.asarray(spec.grasp_center_offset_local, float)
+    _HAS_GOFF = bool(np.linalg.norm(_GOFF) > 1e-9)
+    # grasp height nudge along world +Z from the body centre. spec.grasp_dz is the locked per-object value;
+    # GRASP_DZ env overrides it for quick tuning (a rounded object like the banana grips more securely a few mm
+    # BELOW its equator, where the closing claws cradle UNDER the widest cross-section instead of skidding off
+    # the top). Default = the spec value, so unset reproduces the spec.
+    grasp_dz = float(os.environ.get("GRASP_DZ", spec.grasp_dz))
+
+    def grasp_center_world(root_pos, root_quat):
+        """World grasp centre = root + R(root_quat) @ grasp_center_offset_local (per-env, vectorised over N)."""
+        rp = np.asarray(root_pos, float)
+        if not _HAS_GOFF:
+            return rp.copy()
+        out = rp.copy()
+        rq = np.asarray(root_quat, float)
+        for i in range(rp.shape[0]):
+            out[i] = rp[i] + _R_from_wxyz(rq[i]) @ _GOFF
+        return out
+
+    # the GRASP centre for the settled object (root0 stays the raw root for the degenerate guard + scoring + rest_z)
+    groot0 = grasp_center_world(root0, np_(cube.get_quat()))
+
     # NOTE: the orientation-aware GRASP quat is built by ``grasp_quat_at(i, cx, cy)`` below (used both for the
     # first grasp AND the recovery re-grasp at the cube's relocated pose); ``cquat`` builds the carry/place quat.
     def cquat(i, gqi):
@@ -475,11 +588,17 @@ def collect(N, seed, data_dir, out_dir):
                 max_solver_iters=30, max_samples=1, max_step_size=0.2, damping=0.05, return_error=False))
         return q[:, idx]
 
-    gc = root0.copy(); gc[:, 2] += spec.grasp_dz
+    gc = groot0.copy(); gc[:, 2] += grasp_dz   # grasp the BODY centre (offset onto the curve for a banana)
     drop_z = tabZ + 2 * BOWL_HALF_H + spec.scaled_extents()[2] / 2 + 0.012   # release ABOVE the rim (gentle)
     bxyz = np.stack([bowx, bowy, drop_z], 1).astype(np.float64)
     APP, LIFT, PAPP = 0.12, 0.18, 0.08   # match RoboLab/plan_pick_place defaults (lower lift = gentler, safe)
-    OPEN, CLOSE = GR100_OPEN, GR100_CLOSE
+    # CLOSE = the driven-claw firm-pinch TARGET. GR100_CLOSE (0.9) is a hard squeeze that the OBJECT stops; for a
+    # boxy object the flat face stops the claws early (~2.7mm skin). A ROUNDED body (banana) presents a narrow
+    # contact, so the high-kp PD over-drives the claw deep into it before the constraint balances (>7mm gate).
+    # spec.grasp_close (default GR100_CLOSE) lets a rounded/soft object use a GENTLER target so the pinch holds
+    # by friction without over-penetrating; CLOSE_G env overrides for tuning. Cube keeps the locked 0.9.
+    OPEN = GR100_OPEN
+    CLOSE = float(os.environ.get("CLOSE_G", getattr(spec, "grasp_close", GR100_CLOSE)))
 
     # home tool pose per env, so the FIRST move (home->pre) is densified+smooth too (not a PD snap).
     hposL, hquatL = robot.ee_pose("left"); hposR, hquatR = robot.ee_pose("right")
@@ -562,10 +681,18 @@ def collect(N, seed, data_dir, out_dir):
     pen_tracker = PenetrationTracker(stage.scene, n_envs=N,
                                      ignore_pairs=_empty_close_ignore_pairs(robot.entity))
 
+    # FAST = a DEBUG-ONLY knob (grasp/DR tuning): skip the Nyx path-traced render in the run loop (the slow part,
+    # ~6x the sim cost) and substitute tiny placeholder frames so the video/tile writers still run. The HDF5
+    # state/actions + the grasp/place/penetration METRICS are unaffected (they read sim state, not pixels), so it
+    # gives the COLLECT verdict line quickly while iterating object grasps. NEVER use it for a real collection
+    # (the policy-cam videos would be blank). Unset (default) = full photoreal render.
+    FAST = bool(os.environ.get("FAST"))
+    _blank = {nm: np.zeros((H, W, 3), np.uint8) for nm in cams} if FAST else None
+
     def on_step(t, full, labels_t):
         record_state(full)
         pen_tracker.update()                                       # fold this step's contact buffer into the max
-        views = stage.render()
+        views = _blank if FAST else stage.render()
         for nm in cams:
             cam_steps[nm].append(views[nm])
         cubez.append(np_(cube.get_pos())[:, 2].copy())
@@ -610,8 +737,13 @@ def collect(N, seed, data_dir, out_dir):
         """Run ONE staged phase through the LOCKED executor, accumulating recording into the shared lists.
         Each phase seeds from the current arm pose (its first waypoint), so phase boundaries stay smooth."""
         nonlocal global_max_dq
+        _pen_before = pen_tracker.depth_mm().max() if os.environ.get("PEN_TRACE") else 0.0
         T_ = ex.run(wps, solve, home16, on_step=on_step, settle_steps=settle_steps, during_step=during_step)
         global_max_dq = np.maximum(global_max_dq, ex.max_dq)       # fold this phase's worst jump into the global
+        if os.environ.get("PEN_TRACE"):
+            _pen_after = pen_tracker.depth_mm().max()
+            print(f"[PEN_TRACE] phase {tag}: worst-ever pen {_pen_before:.1f} -> {_pen_after:.1f}mm "
+                  f"(+{_pen_after-_pen_before:.1f} this phase)", flush=True)
         if os.environ.get("DQ_DEBUG"):
             we = int(np.argmax(ex.max_dq))
             lbl = ex.max_dq_label[we] if hasattr(ex, "max_dq_label") else "?"
@@ -622,17 +754,29 @@ def collect(N, seed, data_dir, out_dir):
 
     def detect_grasp_failed():
         """God-mode failure detection (privileged sim signals, owner's examples). A grasp FAILED if either:
-        (1) the cube did NOT rise (max cube z so far this phase - rest z < GRASP_RISE_M), OR
-        (2) the gripper closed on NOTHING: the driven claw sits at/near the empty-close stop AND the cube is
-            far from the EE (so nothing is between the fingers). Returns a per-env bool."""
+        (1) the object did NOT rise (max object z so far this phase - rest z < GRASP_RISE_M), OR
+        (2) the gripper closed on NOTHING: the driven claw sits at/near the empty-close stop AND the object is
+            far from the EE (so nothing is between the fingers). Returns a per-env bool.
+
+        OBJECT-AWARE (generalisation): the distance test uses the GRASP CENTRE (the offset-corrected point the
+        claws actually converge on), NOT the raw root -- for a curved banana the root sits ~3cm off the grasped
+        body point, which made the root-to-ee distance read 'far' and falsely flag a held banana as an empty
+        close. For the cube grasp_center == root, so this is identical to the locked cube behaviour. The empty-
+        close ANGLE test is gated to thin objects only by the distance check (a thin object legitimately closes
+        the claws near GR100_MEET; the rise + grasp-centre-distance still catch a true empty close)."""
         cz = np_(cube.get_pos())
-        rise = cz[:, 2] - cube_rest_z                             # how high the cube currently is vs its rest
+        gcen = grasp_center_world(cz, np_(cube.get_quat()))      # the point the claws hold (offset-corrected)
+        rise = cz[:, 2] - cube_rest_z                             # how high the object currently is vs its rest
         gdpos = np_(robot.entity.get_dofs_position())
         gw = np.where(side_is_left, gdpos[:, gdrv["left"]], gdpos[:, gdrv["right"]])   # driven claw angle
         eep_now = np.where(side_is_left[:, None], np_(ee["l"].get_pos()), np_(ee["r"].get_pos()))
-        cube_to_ee = np.linalg.norm(cz - eep_now, axis=1)
-        empty_close = (gw > EMPTY_CLOSE) & (cube_to_ee > FINGER_REACH)
+        obj_to_ee = np.linalg.norm(gcen - eep_now, axis=1)       # grasp-centre (claw point) to ee_link
+        empty_close = (gw > EMPTY_CLOSE) & (obj_to_ee > FINGER_REACH)
         did_not_rise = rise < GRASP_RISE_M
+        if os.environ.get("DETECT_DEBUG"):
+            print(f"[DETECT_DEBUG] rise(cm)={np.round(rise*100,1).tolist()} gw={np.round(gw,3).tolist()} "
+                  f"obj_to_ee(cm)={np.round(obj_to_ee*100,1).tolist()} "
+                  f"empty={empty_close.tolist()} no_rise={did_not_rise.tolist()}", flush=True)
         return did_not_rise | empty_close
 
     def approach_close_lift_wps(start_p, start_q, rise_p, cx, cy, env_i):
@@ -648,7 +792,7 @@ def collect(N, seed, data_dir, out_dir):
         most dexterous here, elbow bent, well clear of the table), (3) descend to ``pre`` keeping ``gqi`` (pure
         translation), then the locked at->at->close->lift. Each segment is now either pure-translation or
         pure-rotation, so the IK never has to flip a branch -> every step stays C1-continuous (<~0.10 rad)."""
-        gci = np.array([cx, cy, cube_rest_z[env_i] + spec.grasp_dz])
+        gci = np.array([cx, cy, cube_rest_z[env_i] + grasp_dz])
         gqi = grasp_quat_at(env_i, cx, cy)
         tzi = _R_from_wxyz(gqi) @ np.array([0, 0, 1.0])
         apex = rise_p.copy()                                       # the rise apex (above the new cube)
@@ -667,7 +811,12 @@ def collect(N, seed, data_dir, out_dir):
     recovery_attempts = np.zeros(N, np.int32)
     disturb_phase = np.array(["none"] * N, dtype=object)          # "before_close" | "after_close" | "none"
     chased = np.zeros(N, bool)                                    # informed-before-close -> pivoted/chased
-    gqA = np.stack([grasp_quat_at(i, root0[i, 0], root0[i, 1]) for i in range(N)]).astype(np.float64)
+    gqA = np.stack([grasp_quat_at(i, groot0[i, 0], groot0[i, 1]) for i in range(N)]).astype(np.float64)
+
+    def grasp_xy_now():
+        """The offset-corrected GRASP-centre xy from the object's LIVE (possibly shoved) pose -- used by the
+        disturbance chase/retry so the re-grasp aims at the banana's BODY, not its AABB centre in the hollow."""
+        return grasp_center_world(np_(cube.get_pos()), np_(cube.get_quat()))[:, :2]
 
     # ---- PHASE A1: APPROACH (home -> pre -> at -> at), gripper OPEN. The shove fires at each disturbed env's
     # RANDOM step inside this window; the harness counts the sense-delay from there. We do NOT close yet, so an
@@ -714,6 +863,7 @@ def collect(N, seed, data_dir, out_dir):
     # or disturbed-but-informed-only-after-close) close+lift normally; an after-close env thus grabs nothing. ----
     cur_p, cur_q = cur_tool_pose()
     cube_now = np_(cube.get_pos())
+    gxy_now = grasp_xy_now()                                          # offset-corrected grasp-centre xy (banana)
     wpsA2 = []
     for i in range(N):
         if chased[i]:
@@ -721,8 +871,8 @@ def collect(N, seed, data_dir, out_dir):
             # smoothly descend + close+lift at the cube's NEW (sensed) pose. ``approach_close_lift_wps`` builds
             # the singularity-robust rise->reorient->pre->at->close->lift (each segment pure-translation or
             # pure-rotation, so the IK never flips a branch -> the chase stays smooth).
-            sp = cur_p[i].copy(); sp[2] = max(cur_p[i, 2], cube_now[i, 2] + spec.grasp_dz) + RETRY_RISE
-            wp, gqi = approach_close_lift_wps(cur_p[i], cur_q[i], sp, cube_now[i, 0], cube_now[i, 1], i)
+            sp = cur_p[i].copy(); sp[2] = max(cur_p[i, 2], cube_now[i, 2] + grasp_dz) + RETRY_RISE
+            wp, gqi = approach_close_lift_wps(cur_p[i], cur_q[i], sp, gxy_now[i, 0], gxy_now[i, 1], i)
             wpsA2.append(wp)
             gqA[i] = gqi                                           # carry-quat reference follows the chased grasp
         else:
@@ -757,6 +907,7 @@ def collect(N, seed, data_dir, out_dir):
             break
         cur_p, cur_q = cur_tool_pose()
         cube_now = np_(cube.get_pos())                            # RE-LOCATE the (shoved) cube from the sim
+        gxy_now = grasp_xy_now()                                  # offset-corrected grasp-centre xy (banana)
         wpsB = []
         for i in range(N):
             if todo[i]:
@@ -764,8 +915,8 @@ def collect(N, seed, data_dir, out_dir):
                 # low rise keeps the elbow bent (dexterous) and the rise->reorient->descend decomposition keeps
                 # the IK on one branch -- no straight-arm / branch-flip singularity (the v1 0.20 m jerk).
                 safe = cur_p[i].copy()
-                safe[2] = max(cur_p[i, 2], cube_now[i, 2] + spec.grasp_dz) + RETRY_RISE
-                wp, gqi = approach_close_lift_wps(cur_p[i], cur_q[i], safe, cube_now[i, 0], cube_now[i, 1], i)
+                safe[2] = max(cur_p[i, 2], cube_now[i, 2] + grasp_dz) + RETRY_RISE
+                wp, gqi = approach_close_lift_wps(cur_p[i], cur_q[i], safe, gxy_now[i, 0], gxy_now[i, 1], i)
                 wpsB.append(wp)
                 gqA[i] = gqi                                       # carry-quat reference follows the re-grasp
             else:
@@ -814,8 +965,18 @@ def collect(N, seed, data_dir, out_dir):
     ch2 = spec.scaled_extents()[2] / 2
     rxy = np.hypot(objf[:, 0] - bowx, objf[:, 1] - bowy)
     rim_z = tabZ + 2 * BOWL_HALF_H
-    placed = (lift_cm > 3) & (rxy < 0.06) & (objf[:, 2] - ch2 > tabZ - 0.005) & \
-             (objf[:, 2] - ch2 < rim_z + 0.01) & (np.linalg.norm(objf - eep, axis=1) > 0.08)
+    # placed-XY tolerance from the SPEC: a cube's tight 6cm stays exactly 6cm (default place_xy_tol_cm=8 -> the
+    # cube path historically used a tighter 0.06; keep 0.06 for the cube, the spec tol for bigger objects whose
+    # bbox centre can rest a few cm off the bowl centre while the body still lies IN the bowl). Cap at the bowl
+    # mouth radius so it never accepts a target resting OUTSIDE the bowl.
+    place_r = 0.06 if spec.is_cube else min(0.085, max(0.06, spec.place_xy_tol_cm / 100.0))
+    # height band: a compact object's bbox centre rests near the bowl floor (< rim); an ELONGATED/flat target
+    # draped across the ~7.5cm bowl mouth rests with its bbox centre HIGHER (part of the body bridges the rim),
+    # so allow the centre up to ~one body-half above the rim for non-cube targets (still rejects a target perched
+    # well ABOVE the bowl or stuck on a finger -- the ee-distance test below catches the held case).
+    top_margin = 0.01 if spec.is_cube else float(ch2 + 0.02)
+    placed = (lift_cm > 3) & (rxy < place_r) & (objf[:, 2] - ch2 > tabZ - 0.005) & \
+             (objf[:, 2] - ch2 < rim_z + top_margin) & (np.linalg.norm(objf - eep, axis=1) > 0.08)
     bottom = objf[:, 2] - ch2
     wall_pen = (((rxy > 0.065) & (rxy < 0.11) & (bottom > tabZ + 0.012) & (bottom < rim_z)) | (bottom < tabZ - 0.015))
     print(f"[COLLECT] {int((lift_cm>3).sum())}/{N} grasped, {int(placed.sum())}/{N} placed, "
@@ -986,7 +1147,11 @@ def collect(N, seed, data_dir, out_dir):
 if __name__ == "__main__":
     N = int(sys.argv[1]) if len(sys.argv) > 1 else 100
     SEED = int(sys.argv[2]) if len(sys.argv) > 2 else 7
-    DATA = os.environ.get("DATA_DIR", "/data3/genesis_fulldr")
-    OUT = os.environ.get("OUT_DIR", "genesis_firefly/output/temp/fulldr_collect")
+    # The CONFIGURABLE target: default "cube" so ``pickplace.py N seed`` reproduces the cube collection EXACTLY
+    # (paths + DR + clutter byte-for-byte). For a non-cube target the default DATA/OUT dirs are suffixed by the
+    # target so different objects never overwrite each other; DATA_DIR/OUT_DIR env vars still override.
+    suffix = "" if TARGET == "cube" else f"_{TARGET}"
+    DATA = os.environ.get("DATA_DIR", f"/data3/genesis_fulldr{suffix}")
+    OUT = os.environ.get("OUT_DIR", f"genesis_firefly/output/temp/fulldr_collect{suffix}")
     gs.init(backend=gs.gpu)
-    collect(N, SEED, DATA, OUT)
+    collect(N, SEED, DATA, OUT, target=TARGET)

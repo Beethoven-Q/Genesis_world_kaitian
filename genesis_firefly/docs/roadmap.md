@@ -322,3 +322,27 @@ agent-native; subagents for context; rigorous, no hallucination.
 - **NEXT (forward plan §C):** generalize the pick-place task to a CONFIGURABLE TARGET object → solve banana/pen
   (elongated, the orientation-aware grasp handles them) + ATTEMPT apple/tennis-ball (round = the sphere-ejection
   caging challenge); then full-DR collect (owner exam); then virtual-EE + mug-hang; then the dex-hand BRANCH.
+- **2026-06-20 — Configurable-target pick-place DONE; only the cube grasps cleanly with the firm GR100 jaw.**
+  *Change:* the **same `tasks/pickplace.py`** now picks ANY registry object via the **`TARGET` env var** (default
+  `cube`). `spawn_target` builds the target with a faithful grasp collider (decomposition, or a single convex hull
+  for a near-convex body); the distractor pool **excludes the target type**; new `ObjectSpec` grasp fields
+  (`grasp_center_offset_local`, `grasp_close`, `grasp_single_hull`, `grasp_decompose_err`); the spawn-clear floor
+  scales with the target footprint; scoring uses `place_xy_tol_cm`. Env debug knobs `FAST`/`GRASP_DZ`/`CLOSE_G`/
+  `TGT_FRIC`/`TGT_SINGLE_HULL`/`DETECT_DEBUG`/`PEN_TRACE`. The grasp-failure detector uses the **grasp centre**
+  (not the raw root) so an offset-grasped banana isn't mis-flagged. Target velocity zeroed at settle end (anti-creep).
+  *Regression (HARD gate):* `TARGET=cube pickplace.py 8 7` → **8/8 grasp+place, 0 pen, max|dq|=0.068** — byte-for-byte
+  the pre-change cube (`spawn_target`'s cuboid branch is the exact old Box; clearance/rng draws unchanged).
+  *Per-object (real DISTURB=0 runs, E≤20):* **cube 8/8 ✅**. **banana ⚠️ partial** (E12: 7/12 grasp, **6/12 placed**,
+  2 over-pen): the body-centre offset + single-hull land the claws on the fruit, but the 2-finger pinch on the
+  **curved 3.8cm girth misses ~50%** of first attempts → retries → the retry re-grasp drives **>7mm** into the
+  rounded body (first grasp alone is a clean ~6.4mm). **pen ❌ 0/20**: the descending open claws **sweep the light
+  thin pen ~12cm aside** → empty close; a deeper grasp NaNs the solver near the table. **book ❌ 0/20 (geometric)**:
+  both flat dims (18,13cm) exceed the ~6cm jaw and the 3cm thickness is vertical when flat. **apple ❌ 0/20** /
+  **tennis_ball ❌ 0/20**: round → the firm pinch **ejects** the sphere (tennis ball launched **km** away — the
+  textbook sphere-squirt). *Root cause:* the firm GR100 parallel-jaw pinch is tuned for the cube's flat,
+  jaw-matched faces; rounded/thin/oversized bodies skid, eject, or over-penetrate. More grasp_dz/friction tuning
+  made it WORSE. *Recommendation:* the rounded objects (apple/tennis/banana) need an **under-actuated/caging or
+  multi-finger hand** → deferred to the **dexterous-hand branch**; the thin pen + the rounded banana would also be
+  helped by a **compliant / contact-stopping close** (close-to-first-contact-then-hold instead of PD-ramping to a
+  fixed firm q=0.9) — a gripper-control change, out of scope for the per-object task tuning. Demos:
+  `output/temp/pickplace_cube_demo.mp4`, `output/temp/pickplace_banana_demo.mp4`.

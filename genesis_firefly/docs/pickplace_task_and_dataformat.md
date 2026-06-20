@@ -50,6 +50,63 @@ bowl = stage.scene.add_entity(
   the YCB bowl USD (the textured `bowl.usd` segfaults Nyx — "MaterialBindingAPI not applied" — so the visual
   geometry is baked to a clean OBJ). Glossy ceramic `gs.surfaces.Smooth`.
 
+> The task file lives at **`tasks/pickplace.py`** and the reusable stage at **`world/manipulation_stage.py`**
+> (the `collectors/`·`scenes/` paths in older revisions of this doc were renamed in the P0 reorg).
+
+### 1a-bis. CONFIGURABLE TARGET object (any registry object, default `cube`)
+
+The **same task** picks-and-places **any registry object** as the grasp target. The **`TARGET` env var** selects
+it; the default is `cube`, so `pickplace.py N seed` reproduces the cube collection **exactly** (the regression
+gate: `TARGET=cube pickplace.py 8 7` → 8/8 grasp+place, 0 penetration, max|dq|=0.068, byte-for-byte). Switching
+the target is a **small per-object adaptation, not a fork** — the orientation-aware grasp, the full DR, the 50/50
+distractors, the disturbance harness, the penetration gate, and go-home are **all reused unchanged**.
+
+```bash
+TARGET=banana CUDA_VISIBLE_DEVICES=0 ./.venv/bin/python genesis_firefly/tasks/pickplace.py 20 7
+# default DATA/OUT dirs are suffixed by the target (…/genesis_fulldr_banana) so objects never overwrite.
+```
+
+**What is target-specific (everything else is shared):**
+
+| Piece | Mechanism |
+|---|---|
+| **which object** | `spec = REGISTRY[TARGET]` (default `cube`); `spawn_target(scene, spec, color, …)` builds it. |
+| **collider** | procedural box/sphere keep their exact collider; a **USD-mesh** target gets a **faithful grasp collider** on its Nyx-safe `*_clean.obj` — convex **decomposition** by default, or a **single convex hull** (`spec.grasp_single_hull`) for a near-convex rounded body so the firm pinch can't drive into a decomposition seam and NaN the solver. |
+| **ref-axis** | already encoded by the spec: **long axis** (elongated) · **face pair** (cube) · **None** (round) — fed to `orientation_aware_grasp_quat`. |
+| **grasp point** | `grasp_center = root + R(quat)·spec.grasp_center_offset_local` (shift onto the **body** of a CURVED object — a banana's AABB centre sits in the hollow of the curve ~3cm off the fruit) `+ [0,0,spec.grasp_dz]`. |
+| **grasp tuning** | per-object `grasp_dz`, `grasp_close` (gentler pinch for a rounded/soft body), `grasp_single_hull`, `grasp_decompose_err`, `grasp_center_offset_local`, `friction`, `place_xy_tol_cm` — all `ObjectSpec` fields. |
+| **spawn-clear floor** | the cube uses the locked 0.125; a bigger target scales it: `footprint_radius + bowl_radius + 1.5cm` (so a banana/book never spawns half-in the bowl). |
+| **distractor pool** | **excludes the target's own type** so the target is never ambiguous among lookalikes (cube target → the legacy `{pen,banana,apple,tennis_ball,book}`; a banana target → `{pen,apple,tennis_ball,book,cube}`). |
+| **scoring** | `place_xy_tol` = 6cm (cube) or `spec.place_xy_tol_cm` (bigger objects whose bbox centre rests a few cm off the bowl centre); a non-cube height band allows an elongated body draped across the rim. |
+
+**Debug knobs (env, off by default — for grasp/DR tuning only):** `FAST=1` skips the Nyx render in the run loop
+(~6× faster, blank policy videos — never for a real collection), `GRASP_DZ`/`CLOSE_G`/`TGT_FRIC`/`TGT_SINGLE_HULL`/
+`TGT_DECOMP` override the per-object grasp params, `DETECT_DEBUG=1` prints the per-env grasp-failure signals,
+`PEN_TRACE=1` prints the worst-ever penetration per phase.
+
+### 1a-ter. Per-object status (2026-06-20)
+
+The orientation-aware grasp + the configurable-target machinery work for **every** object geometrically; the
+limiter is the **firm GR100 parallel-jaw pinch physics**, which is tuned for the cube's flat, jaw-matched faces.
+
+| Object | Geometry | Status | Cause |
+|---|---|---|---|
+| **cube** | 5cm flat box | ✅ **solved** 8/8 (regression) | flat faces stop the claws at ~3mm; jaw-matched. |
+| **banana** | curved, ~3.8cm girth, 3.6cm tall | ⚠️ **partial** ~6/12 grasp, ~5/12 placed, ~2 over-penetrate | the orientation grasp + body-centre offset land the claws on the fruit, but a 2-finger pinch on the **curved** girth **misses ~50%** of first attempts (claws skid / close empty); the misses trigger retries, and the retry re-grasp drives the firm pinch **>7mm** into the rounded body (the first grasp alone is a clean ~6.4mm). Single-hull collider stops the NaN; `grasp_dz=-0.006` + body offset is the best balance found. |
+| **pen** | thin 2.1cm wide, 1.9cm tall, 12cm long, 20g | ❌ **not solved** 0/20 | the descending **open claws sweep the light thin pen ~12cm aside** before they close → every close is empty (`gw≈0.57`, the empty-close stop). A deeper grasp to pin it drives into the table and **NaNs** the Newton solver. |
+| **book** | flat slab 18×13×3cm | ❌ **not solved** 0/20 (geometric) | both horizontal dimensions (18, 13cm) **exceed the ~6cm jaw**, and the only graspable dimension — the 3cm thickness — is **vertical** when the book lies flat, so a top-down/tilted parallel jaw cannot reach it. A side-approach or a suction/edge-pinch skill would be needed. |
+| **apple** | ~7cm sphere | ❌ **not solved** 0/20 | round → the 2-finger pinch **ejects** it (no ref axis cages it); `gw≈0.57` empty close, apple shoved aside. |
+| **tennis_ball** | 6.7cm felt sphere, 57g | ❌ **not solved** 0/20 | round + light → the firm pinch converts the squeeze into a **velocity impulse that LAUNCHES the ball** (observed flung **km** away). The canonical sphere-squirt. |
+
+**Round-object (apple/tennis_ball/banana) recommendation:** a 2-finger parallel jaw cannot stably cage a smooth
+convex body — the firm pinch either skids off or ejects it. The fix is **not** more grasp_dz/friction tuning (both
+made the penetration/ejection worse). It needs an **under-actuated / caging** grasp (wrap-around fingers, a
+soft/compliant or multi-finger hand that encloses the sphere) or a **pinch-point** strategy that approaches a
+geometric feature (an apple stem, a seam). This is deferred to the **dexterous-hand branch** (roadmap §C). For the
+**thin pen** and the **rounded banana**, a **compliant / contact-stopping close** (close to first contact then hold,
+rather than PD-ramping to a fixed firm `q=0.9`) would stop the sweep-aside and the over-penetration — a change to
+the gripper-control path, out of scope for the per-object task tuning here.
+
 **The bowl collision model is the single most important realism choice.** It is loaded as a **convex
 DECOMPOSITION** collider (`convexify=True, decompose_object_error_threshold=0.04, decimate=False` — coacd),
 exactly RoboLab's PhysX `convexDecomposition` recipe. The thin concave shell is split into a set of **solid
