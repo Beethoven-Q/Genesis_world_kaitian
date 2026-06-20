@@ -42,6 +42,14 @@ simulator with **RTX-grade Nyx** photoreal rendering, then generalizes it into t
   (solid never penetrates, hollow stays hollow) — see the object-refiner agent ([agents.md](agents.md)) +
   [robot_collision_cameras.md](robot_collision_cameras.md) + [lessons_genesis_nyx.md](lessons_genesis_nyx.md).
   (Owner directive, re-emphasized 2026-06-19.)
+- **GRASPS ARE ALWAYS FIRM / FORCEFUL — never a loose close (HARD RULE, owner 2026-06-20).** The gripper closes
+  WITH FULL FORCE; the object's COLLISION naturally stops the claws at the object's width; the firm PD MAINTAINS
+  force against the object → a firm, strong grasp (this is how the cube grasp works). NEVER "detect contact and
+  stop/relax the force" — that gives a loose grasp. When a round/thin object EJECTS, the bug is **grasp DEPTH /
+  caging**, NOT the force: the default offset put the object at the curved GR100 claws' TIPS (uncaged → the firm
+  close squirts it out); the fix is a DEEPER per-object grasp so the object sits in the claws' CRADLE (~Z_ee
+  −2 cm) where the firm close CAGES it (verified: apple held + lifted, penetration ~2 mm). Fix the depth/cage so
+  the FIRM grasp holds — do not go loose.
 - **Maintain `docs/roadmap.md`** — a living problem→change→why→result log. Append a dated entry whenever you fix
   a real problem, change a contract, or make a non-obvious decision. This is how we trace back what we did.
 - **2×2 four-view preview tile** for every collection (see §7). **Storage:** smoke → `output/`; full collections
