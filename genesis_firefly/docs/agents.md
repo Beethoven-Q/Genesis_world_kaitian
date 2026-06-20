@@ -100,10 +100,11 @@ and a Nyx multi-view augment render are designed but **deferred to future** (the
 
 ## Disturbance + failure-recovery  — a HARNESS + god-mode recovery control  [BUILT]
 Generates **failure-and-recovery** data so the trained policy is robust. **This is NOT an LLM subagent.**
-It is a deterministic injection HARNESS (`skills/disturbance.py`) plus a god-mode recovery CONTROL staged
-into the task (`tasks/pickplace.py`) — the same first-principles pattern as the penetration gate and the
-50/50 distractors: a privileged, reproducible sim mechanism the main agent *calls*, not a planner it delegates
-to. Full spec: [disturbance_recovery.md](disturbance_recovery.md).
+It is a deterministic injection HARNESS (`skills/disturbance.py`) plus a god-mode recovery CONTROL in the task
+(`tasks/pickplace.py`) — the same first-principles pattern as the penetration gate and the 50/50 distractors: a
+privileged, reproducible sim mechanism the main agent *calls*, not a planner it delegates to. **Opt-in:
+`DISTURB` defaults to 0** (the default run is the clean single-trajectory pick-place). Full spec:
+[disturbance_recovery.md](disturbance_recovery.md).
 
 - **Role.** With a per-env PROBABILITY (default ~0.34, mirroring the 50/50 distractor `has_dist` pattern),
   inject a GENTLE random in-plane shove on the TARGET cube DURING the grasp approach → the planned grasp
@@ -115,11 +116,14 @@ to. Full spec: [disturbance_recovery.md](disturbance_recovery.md).
   friction (a physical shove, no teleport) so the committed grasp closes on nothing.
 - **Detection (privileged).** `grasp_failed = (cube did NOT rise > 3 cm) OR (driven gripper near the empty-close
   stop AND cube far from the EE)` — read straight from the cube pose + gripper joint position.
-- **Recovery (batched, ≤2 attempts).** Failed envs get extra batched phases (rise to a safe height, REOPEN,
-  RE-LOCATE the cube from the sim, re-plan + re-grasp via the LOCKED grasp/waypoint builders); successful envs
-  HOLD their grasp. Then the place phase runs for all. The recorded demo therefore contains failed-grasp +
-  recovery + success — that *is* the training signal. Motion stays on the one smooth path (BatchExecutor +
-  densify); no new motion engine.
+- **Recovery (per-env, ONE attempt, NO barrier).** In the final batch each env runs its OWN continuous
+  remainder: a HELD env runs `place→home` straight away; a FAILED env runs `rise→reopen→relocate→re-grasp→
+  lift→place→home` (re-located from the sim via the LOCKED grasp/waypoint builders). Both run in the same
+  batch, so the held env executes its place→home **concurrently** with the recovery and terminates at its own
+  home — it NEVER idles in the air through the recovery (this replaced the old staged Phase-B retry loop where
+  successful envs HELD their lifted cube ≈ the owner-flagged mid-air idle). The recorded demo contains
+  failed-grasp + recovery + success — that *is* the training signal. Motion stays on the one smooth path
+  (BatchExecutor + densify); no new motion engine. Demos are variable-length (per-env natural termination).
 - **HDF5 attrs.** `disturbed` (bool), `recovered` (bool: disturbed AND placed), `recovery_attempts` (int).
 - **Why.** Clean-only data yields brittle policies; failure-recovery modes teach the policy to detect a failed
   grasp and replan, handling the imperfect real world.

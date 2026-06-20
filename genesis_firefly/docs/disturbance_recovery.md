@@ -1,24 +1,30 @@
 # Disturbance v2 — collaborative-timing CHASE + smooth failure-RECOVERY (god-mode control)
 
-A capability for the Genesis firefly cube→bowl task that generates **two** failure-mode training signals from
-**one** mechanism: a gentle, privileged shove of the TARGET cube at a **random time during the grasp approach**,
-sensed by the god-mode solver only after a perception **sense-delay**. Depending on WHEN the solver learns the
-cube moved, it responds in one of two collaborative ways:
+An **opt-in augmentation** for the Genesis firefly pick→bowl task that generates **two** failure-mode training
+signals from **one** mechanism: a gentle, privileged shove of the TARGET at a **random time during the grasp
+approach**, sensed by the god-mode solver only after a perception **sense-delay**. Depending on WHEN the solver
+learns the target moved, it responds in one of two collaborative ways:
 
 - **informed BEFORE the gripper closes → CHASE.** The solver ABORTS the current grasp, rises a *little*,
-  reorients, and SMOOTHLY re-targets ("chases") the cube to its NEW pose, then closes + lifts there. This is
+  reorients, and SMOOTHLY re-targets ("chases") the target to its NEW pose, then closes + lifts there. This is
   **chase-a-moving-object** data.
-- **informed only AFTER the close → FAIL + RETRY.** Too late — the grasp already closed on nothing → it FAILS →
+- **informed only AFTER the close → FAIL + RECOVER.** Too late — the grasp already closed on nothing → it FAILS →
   rises a *little* → re-locates + re-grasps the new pose. This is **failure → recover → replan** data.
 
 > **This is NOT an LLM subagent.** It is a deterministic injection **HARNESS** (`skills/disturbance.py`) plus a
-> god-mode **CONTROL** staged into the task (`tasks/pickplace.py`) — the same first-principles pattern as the
-> penetration gate and the 50/50 distractors. Both data modes are perfectly reproducible from `(seed,
-> probability)`.
+> god-mode **CONTROL** in the task (`tasks/pickplace.py`) — the same first-principles pattern as the penetration
+> gate and the 50/50 distractors. Both data modes are perfectly reproducible from `(seed, probability)`.
 
-Files: `skills/disturbance.py` (the harness: random-timing shove + sense-delay), `tasks/pickplace.py` (staged
-execution: approach → chase/close → retry → place + detection), `skills/executor.py` (the additive `during_step`
-hook + an optional `DQ_DEBUG` jerk-localiser — the only motion-path touch).
+> **`DISTURB` DEFAULTS TO 0 (off).** The default pick-place run is the CLEAN single continuous trajectory (the
+> foundation + the bulk fine-tune data + what the grasp-solving runs use). This harness is an explicit
+> augmentation you opt into with `DISTURB>0`. **Every trial is fully independent — there is NO cross-env
+> barrier:** a held env NEVER idles in the air while another env recovers (owner HARD rule). The disturbance is
+> a per-env EXTENSION of that env's own trajectory; other envs finish and terminate at their own home (demos are
+> variable-length — see §2).
+
+Files: `skills/disturbance.py` (the harness: random-timing shove + sense-delay), `tasks/pickplace.py` (per-env
+execution: approach → close/chase → place-or-recover + detection + natural termination), `skills/executor.py`
+(the additive `during_step` hook + an optional `DQ_DEBUG` jerk-localiser — the only motion-path touch).
 
 ---
 
@@ -72,45 +78,55 @@ boolean selects CHASE vs RETRY per env.
 
 ---
 
-## 2. Staged execution + god-mode CHASE / RETRY (`tasks/pickplace.py`)
+## 2. Execution model — per-env, NO cross-env barrier (`tasks/pickplace.py`)
 
-The run is restructured into PHASES on the **one locked motion path** (BatchExecutor + densify). Chase and
-recovery are just ADDITIONAL batched phases — **no new motion engine**. All phases share the SAME recording
-callback (`on_step`), so the HDF5 demo is the full disturbed + chase/recover + success trajectory. Each phase
-seeds from the arm's CURRENT pose, so phase boundaries stay smooth.
+Everything runs on the **one smooth motion path** (BatchExecutor + densify) — chase and recovery add no new
+motion engine. The load-bearing rule (owner): **each trial is fully independent; no env ever idles/holds waiting
+for another env.** Two cases:
 
-### Phase A1 — APPROACH (home → pre → at → at), gripper OPEN
-The shove fires at each disturbed env's random step inside this window; the harness counts the sense-delay from
-there. The gripper does **not** close yet, so an env informed during A1 can ABORT and chase instead of closing.
+### Clean case — `DISTURB=0` (the default, the foundation)
+One **single continuous per-env trajectory**, run in ONE `run_phase`:
 
-### Phase A2 — CLOSE+LIFT (non-chase) / CHASE (chase envs)
-- **CHASE envs** (informed before close) do NOT close. They get the smooth singularity-robust re-grasp at the
-  cube's NEW sensed pose (see §3): rise → reorient → pre → at → close → lift. The gripper gently *chases* the
-  moved cube.
-- **All other envs** (clean, or disturbed-but-informed-only-after-close) do a **pure-dwell close + lift** at
-  the arm's current pose (hold pose, ramp the gripper). An after-close env's cube has already slid away → this
-  closes on nothing → it fails (caught by detection below).
-
-### Detection (god-mode privileged signals)
-After Phase A, per env, a grasp FAILED if either:
-
-```python
-did_not_rise       = (cube_z_now - cube_rest_z) < 3 cm                    # the cube never came up
-empty_close        = (driven_gripper_angle > GR100_MEET - 0.04) AND       # claws met the empty-close stop
-                     (cube-to-EE distance > 12 cm)                        # nothing is between the fingers
-grasp_failed       = did_not_rise OR empty_close
+```
+home → pre → at → close → lift → carry → lower → release → GO HOME
 ```
 
-read straight from `cube.get_pos()` + the driven gripper joint + the EE link.
+There are **no staged phases**, so there is structurally no point at which a fast env holds a lifted object
+waiting for a slow env (the old idle-in-the-air bug). Each env's stream densifies to its own length; faster envs
+reach home first and the recorder **trims each env's idle-home tail** → **variable-length demos** (per-env
+natural termination — see below). This is the path the grasp-solving runs and the bulk fine-tune collections use.
 
-### Phase B — RETRY recovery (batched, ≤ 2 attempts) for the after-close failures
-Failed envs: rise a **SMALL** amount (`RETRY_RISE = 0.10 m`, *not* a high safe height), REOPEN, RE-LOCATE the
-cube, and re-grasp the new pose via the same smooth re-grasp builder (§3). Successful/chased envs HOLD their
-grasp so they ride along untouched. Re-detect after each attempt; loop up to 2. The recovery is fully BATCHED.
+### Disturbed case — `DISTURB>0` (opt-in), still per-env with NO lifted barrier
+Three lightweight segments — only because the chase/recovery needs the post-shove pose READ from the sim (the
+god-mode privilege). It is **not** a global barrier:
 
-### Phase C — place (carry → lower → rel → ret → go_home) for ALL envs
-The locked place sequence from the current pose. The carry/place orientation reference follows whichever grasp
-actually succeeded (`gqA[i]` is updated by the chase/retry to the achieved grasp quat).
+- **seg1 APPROACH** (`home → pre → at → at`, OPEN). The shove fires at each disturbed env's random step inside
+  this window; the harness counts the sense-delay from there. The gripper doesn't close yet, so an env informed
+  here can ABORT and chase.
+- **seg2 CLOSE + LIFT** (chase envs pivot to the cube's NEW sensed pose). **CHASE envs** get the smooth
+  singularity-robust re-grasp (§3): rise → reorient → pre → at → close → lift. **Other envs** do a pure-dwell
+  close + lift at the current pose; an after-close env's cube has slid away → closes on nothing → fails.
+- **Detection (god-mode):** `grasp_failed = did_not_rise OR empty_close`, read from `cube.get_pos()` + the
+  driven gripper joint + the EE link (`did_not_rise = rise < 3 cm`; `empty_close = claws met the empty stop AND
+  the grasp-centre is far from the EE`).
+- **seg3 PLACE-or-RECOVER (one batch, the barrier-killer).** Each env runs its OWN continuous remainder:
+  - a **HELD** env runs `place → home` straight away;
+  - a **FAILED** env runs `rise(small) → reopen → relocate → re-grasp → lift → place → home` — **one** recovery
+    attempt ("rise a bit, try the new pose").
+
+  Both run in the SAME batch, so a held env executes its place→home **concurrently** with the recovery and
+  **terminates at its own home** — it never idles in the air through the recovery (this is what replaced the old
+  Phase-B retry loop, where every successful env HELD its lifted cube through ≤2 retry iterations of the slowest
+  env ≈ the ~5 s mid-air idle the owner flagged). `RETRY_RISE = 0.10 m` keeps the re-grasp in the dexterous
+  workspace (no near-singularity straighten — §3). The carry/place orientation follows the achieved grasp quat.
+
+### Per-env natural termination (variable-length demos)
+The executor pads every env to the global max T (hold-last-pose) so the slowest env can finish; a faster env
+then sits STATIC at home for the tail. That idle-home tail is **not recorded** — the writer trims each env to its
+own last MOTION frame (+ a tiny settle margin), detected on the recorded joint stream (the home hold is exactly
+static, PD jitter < 1e-4 rad/frame; real motion is >> 1.5e-3). **Demos come out variable-length and that is
+natural + accepted** (LeRobot supports it). Because the clean path is one continuous trajectory, this only ever
+trims a true static tail — there is no mid-trajectory hold to trim.
 
 ---
 
@@ -176,14 +192,13 @@ documented ~3 mm finger-into-cube contact skin), **not** an abnormal penetration
 the same-gripper L-claw↔R-claw geom pairs to the penetration tracker's `ignore_pairs` (computed by link name).
 ALL other self-contact (arm-into-arm, claw-into-other-gripper) still counts.
 
-Each run prints:
+Each run prints (the per-env demo-length line appears on EVERY run, disturbed or not):
 
 ```
-[COLLECT] disturbance: shoved K env(s) [...] (prob=p, |v|~0.70-0.95 m/s, approach_T=.., sense_delay~15-30 steps)
-[COLLECT] disturbance branch: before_close(chase)=c [...]  after_close(retry)=r [...]
-[COLLECT] detect after PhaseA: failed=f/N (of disturbed ../..; chased-still-failed 0/..; false-flags on clean 0/..)
-[COLLECT] recovery attempt 1: still-failed=0/N
+[COLLECT] disturbance: shoved K env(s) [...] (prob=p, approach_T=..); before_close(chase)=c after_close(retry)=r
+[COLLECT] detect after pick: failed=f/N (disturbed ../..)
 [COLLECT] disturbance: d disturbed (c chased, r recovered, f failed)  recovery_attempts(disturbed)=[...]
+[COLLECT] per-env demo length (natural termination): min=.. max=.. mean=.. of Tr=.. recframes
 ```
 
 ---
@@ -191,23 +206,21 @@ Each run prints:
 ## 5. Running it
 
 ```bash
-# WITH disturbance (default prob 0.34)
-CUDA_VISIBLE_DEVICES=0 DATA_DIR=/path OUT_DIR=genesis_firefly/output/temp/disturb_run \
-  ./.venv/bin/python genesis_firefly/tasks/pickplace.py 16 7
+# CLEAN single-trajectory pick-place (the DEFAULT -- DISTURB unset == 0)
+CUDA_VISIBLE_DEVICES=0 DATA_DIR=/path OUT_DIR=genesis_firefly/output/temp/run \
+  ./.venv/bin/python genesis_firefly/tasks/pickplace.py 8 7
 
-# NO disturbance (parity with the prior locked task)
-CUDA_VISIBLE_DEVICES=0 DISTURB=0 ... ./.venv/bin/python genesis_firefly/tasks/pickplace.py 8 7
-
-# tune the chase/retry mix probability
-CUDA_VISIBLE_DEVICES=0 DISTURB=0.5 ...
+# OPT IN to failure-recovery augmentation (per-env, no barrier)
+CUDA_VISIBLE_DEVICES=0 DISTURB=0.5 ... ./.venv/bin/python genesis_firefly/tasks/pickplace.py 16 7
 
 # localise a jerk (per-phase worst |dq| + the segment it occurred on)
 CUDA_VISIBLE_DEVICES=0 DISTURB=0.5 DQ_DEBUG=1 ...
 ```
 
-Env vars: `DISTURB` (per-env disturbance probability; 0 = off, default 0.34), `DQ_DEBUG` (per-phase jerk
-localiser), `DATA_DIR`, `OUT_DIR`, `DIST_DEBUG` (distractor displacement trace). Prereqs: the venv (`./.venv`),
-GPU 0 (`CUDA_VISIBLE_DEVICES=0`), the Genesis firefly assets. Run from the repo root.
+Env vars: `DISTURB` (per-env disturbance probability; **default 0 = off**, set e.g. 0.5 to opt in), `DQ_DEBUG`
+(per-phase jerk localiser), `DATA_DIR`, `OUT_DIR`, `DIST_DEBUG` (distractor displacement trace). Prereqs: the
+venv (`./.venv`), one GPU (`CUDA_VISIBLE_DEVICES=k`, one sim process per GPU), the Genesis firefly assets. Run
+from the repo root.
 
 ---
 
@@ -224,57 +237,40 @@ GPU 0 (`CUDA_VISIBLE_DEVICES=0`), the Genesis firefly assets. Run from the repo 
 
 `z`-change ≈ 0 throughout. We use `(0.70, 0.95)` → a reliable ~3–5 cm shift.
 
-### (a) No-disturbance parity (`DISTURB=0`, E=8, seed 7) — proves the staged refactor didn't regress
+### (a) Clean default (`DISTURB=0`, E=8, seed 7, cube) — the single-trajectory foundation
 ```
-[COLLECT] executed T=1121 (3 left / 5 right arm)  render+sim 112.8s  max per-step |dq|=0.084 rad (all phases)
 [COLLECT] 8/8 grasped, 8/8 placed, through-wall=0/8
-[COLLECT] penetration: max=2.9mm (thresh=7mm), abnormal=0/8
+[COLLECT] penetration: max=2.7mm (thresh=7mm), abnormal=0/8
 [COLLECT] disturbance: 0 disturbed (0 chased, 0 recovered, 0 failed)
+[COLLECT] per-env demo length (natural termination): min=104 max=110 mean=107 of Tr=110 recframes
 ```
-8/8 grasp+place, **penetration 0**, **max |dq| 0.084 rad** (< 0.12), T normal → the locked task is reproduced.
+8/8 grasp+place, **penetration 0**, **max |dq| ≈ 0.03 rad** (very smooth), **VARIABLE-LENGTH demos (104–110)** —
+each env runs one continuous `pick→place→home` and terminates at its own home, no mid-air hold, no barrier.
 
-### (b) With disturbance (`DISTURB=0.5`, E=16) — both data modes appear, motion stays smooth
-**Seed 7:**
+### (b) Disturbance opt-in (`DISTURB=0.5`, E=8, seed 7) — both modes appear, NO cross-env wait
 ```
-[COLLECT] disturbance: shoved 7 env(s) [0, 2, 5, 7, 12, 14, 15] (prob=0.5, |v|~0.70-0.95 m/s, approach_T=316, sense_delay~15-30 steps)
-[COLLECT] disturbance branch: before_close(chase)=5 [0, 5, 7, 12, 15]  after_close(retry)=2 [2, 14]
-[COLLECT] detect after PhaseA: failed=2/16 (of disturbed 2/7; chased-still-failed 0/5; false-flags on clean 0/9)
-[COLLECT] recovery attempt 1: still-failed=0/16
-[COLLECT] executed T=2239 (6 left / 10 right arm)  render+sim 400.5s  max per-step |dq|=0.096 rad (all phases)
-[COLLECT] 16/16 grasped, 16/16 placed, through-wall=0/16
-[COLLECT] penetration: max=2.9mm (thresh=7mm), abnormal=0/16
-[COLLECT] disturbance: 7 disturbed (5 chased, 2 recovered, 0 failed)  recovery_attempts(disturbed)=[0, 1, 0, 0, 0, 1, 0]
-```
-**Seed 23:**
-```
-[COLLECT] disturbance: shoved 10 env(s) [0, 2, 3, 4, 6, 7, 8, 13, 14, 15] (prob=0.5, ..., approach_T=309, sense_delay~15-30 steps)
-[COLLECT] disturbance branch: before_close(chase)=5 [0, 2, 3, 8, 14]  after_close(retry)=5 [4, 6, 7, 13, 15]
-[COLLECT] detect after PhaseA: failed=1/16 (of disturbed 1/10; chased-still-failed 0/5; false-flags on clean 0/6)
-[COLLECT] recovery attempt 1: still-failed=0/16
-[COLLECT] executed T=2086 (9 left / 7 right arm)  render+sim 411.9s  max per-step |dq|=0.098 rad (all phases)
-[COLLECT] 16/16 grasped, 14/16 placed, through-wall=0/16
-[COLLECT] penetration: max=2.6mm (thresh=7mm), abnormal=0/16
-[COLLECT] disturbance: 10 disturbed (5 chased, 3 recovered, 2 failed)  recovery_attempts(disturbed)=[0, 0, 0, 1, 0, 0, 0, 0, 0, 0]
+[COLLECT] disturbance: shoved 5 env(s) [0, 1, 2, 4, 5] (prob=0.5, approach_T=292); before_close(chase)=1 after_close(retry)=4
+[COLLECT] detect after pick: failed=3/8 (disturbed 3/5)
+[COLLECT] executed T=2091 (3 left / 5 right arm)  max per-step |dq|=0.076 rad (all phases)
+[COLLECT] 8/8 grasped, 8/8 placed, through-wall=0/8
+[COLLECT] penetration: max=3.0mm (thresh=7mm), abnormal=0/8
+[COLLECT] disturbance: 5 disturbed (1 chased, 4 recovered, 0 failed)  recovery_attempts(disturbed)=[1, 0, 1, 1, 0]
+[COLLECT] per-env demo length (natural termination): min=140 max=214 mean=171 of Tr=214 recframes
 ```
 
 **Reading it.**
-- **Both modes occur, every run.** Seed 7: **5 CHASE + 2 RETRY**; seed 23: **5 CHASE + 5 after-close** (3
-  recovered + 2 failed). Some disturbed envs hit BEFORE-close → smooth CHASE → success; some hit AFTER-close →
-  fail → smooth retry → success — exactly as specified.
-- **Detection is exact:** 0 false-flags on clean grasps (0/9 + 0/6), 0 chased-still-failed (0/5 + 0/5); every
-  *detected* failure recovered in 1 attempt.
-- **Motion is SMOOTH everywhere:** global all-phase max |dq| **0.096 / 0.098 rad < 0.12** (no near-singularity
-  spike), incl. the chase and the retry. The smooth-retry fix is confirmed by `DQ_DEBUG`: the phase-B retry
-  worst jump fell **0.198 → 0.068 rad** after the rise→reorient→descend decomposition.
-- **Penetration 0** abnormal in every run (the empty-close finger↔finger contact is correctly allow-listed).
-- The 2 **`failed`** envs in seed 23 are marginal late-shove grasps the place/penetration gate correctly
-  rejects (`success=False`) — labelled hard-edge data, not hidden.
+- **Both modes occur:** 1 before-close CHASE + 4 after-close; detection flagged exactly the 3 genuine
+  closed-on-nothing misses; **all recovered → 8/8 placed** in one attempt (`recovery_attempts=[1,0,1,1,0]`).
+- **NO cross-env wait — the headline.** Demo lengths span **140 → 214 recframes**: the clean/held envs terminate
+  at ~140 while the recovering envs run to 214, **each at its OWN home**. A held env is ~74 recframes (~7 s)
+  shorter — it does NOT idle in the air through another env's recovery (the old Phase-B barrier is gone). This
+  is the owner's per-env-independence rule, proven in the data.
+- **Motion SMOOTH:** all-phase max |dq| **0.076 rad < 0.12** (no near-singularity spike), incl. the chase + the
+  recovery (the rise→reorient→descend decomposition, §3). **Penetration 0** abnormal (empty-close finger↔finger
+  contact correctly allow-listed).
 
-### Showcase clips
-- `output/temp/disturb_chase_demo.mp4` — a **before-close pivot/CHASE** (seed 7 env 0: shove sensed before
-  close → abort + small rise + reorient + chase the new pose → place).
-- `output/temp/disturb_retry_demo.mp4` — an **after-close FAIL → smooth RETRY** (seed 7 env 2: shove sensed
-  after close → empty close fails → smooth low retry-lift + reorient + re-grasp the new pose → place).
+> Re-verify on the per-env code: `CUDA_VISIBLE_DEVICES=0 DISTURB=0.5 FAST=1 ./.venv/bin/python
+> genesis_firefly/tasks/pickplace.py 8 7` (drop `FAST=1` for the photoreal videos).
 
 ---
 

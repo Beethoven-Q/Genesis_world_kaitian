@@ -346,3 +346,24 @@ agent-native; subagents for context; rigorous, no hallucination.
   helped by a **compliant / contact-stopping close** (close-to-first-contact-then-hold instead of PD-ramping to a
   fixed firm q=0.9) — a gripper-control change, out of scope for the per-object task tuning. Demos:
   `output/temp/pickplace_cube_demo.mp4`, `output/temp/pickplace_banana_demo.mp4`.
+
+- **2026-06-20 — NO-WAIT ROOT RE-ARCHITECTURE + clean reset (the foundation fix).** *Problem:* the owner kept
+  seeing the arm **idle in the air after the grasp** and trials waiting on each other. *Root cause:* the staged
+  `run_phase` A1/A2/**B**/C structure (added with disturbance-v2) is a per-phase BARRIER — in the B-retry loop
+  every successful env HELD its lifted cube through the slowest env's retries (≈ the ~5 s mid-air idle), and each
+  phase padded all envs to its own max. A grasp-solving subagent, not knowing the *hold* was the bug, then built
+  a pile of machinery to fight the symptom (cradle-depth, `carry_keep_grasp_quat`, slow-close dwell). *Change:*
+  (1) **reverted** all that uncommitted churn + swept the debug junk (clean reset; the documented rules kept);
+  (2) **re-architected** `tasks/pickplace.py`: the clean default (`DISTURB=0`) is now ONE continuous per-env
+  trajectory `home→pre→at→close→lift→carry→lower→release→home` in a single `run_phase` — **no barrier**; the
+  disturbance path is a per-env seg1/seg2/seg3 where a held env runs `place→home` concurrently with another env's
+  recovery (no lifted-hold); (3) **per-env natural termination** — the writer trims each env's idle-home tail →
+  **variable-length demos** (owner: "different lengths are natural"); (4) `DISTURB` now defaults to **0**
+  (disturbance is opt-in augmentation). *Result (real runs):* clean cube **8/8 grasp+place, 0 pen, max|dq|≈0.03**,
+  demo lengths **104–110** (variable, no mid-air hold); disturbance `DISTURB=0.5` **8/8 placed, 0 pen**, demo
+  lengths **140–214** — the held envs terminate ~74 recframes before the recovering ones, *each at its own home*
+  = cross-env independence proven in the data. Docs: [disturbance_recovery.md](disturbance_recovery.md) revised.
+  *Next (owner steer):* re-solve **apple / tennis / banana / pen** on this clean foundation with a SIMPLE firm
+  top-down grasp — the prior "needs a dex hand" conclusion was likely the broken-foundation symptom; the owner is
+  confident these are easy when the foundation is correct (RoboLab found apple the easiest). Re-evaluate from
+  scratch before adding any grasp machinery.
