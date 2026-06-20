@@ -220,3 +220,32 @@ phase lands. Requirements live in [project_overview.md](project_overview.md) (bl
   hook to BatchExecutor (additive). HDF5 attrs `disturbed/recovered/recovery_attempts`. Note: the staged refactor
   raised the base no-disturbance max|dq| 0.03→0.098 (still smooth) — a minor phase-boundary-continuity polish for
   later. Full spec: `disturbance_recovery.md`.
+- **2026-06-19 — DR-STRATEGIST agent layer (MVP) + sweep probe.** *Goal* (owner): make full DR more automatic —
+  a specialized subagent + harness that pushes DR ranges to the MAX representative extent, models cross-axis
+  couplings, and builds experience over runs. *Built* (P4 first slice): **(1)** `.claude/agents/dr-strategist.md`
+  — a real Claude Code subagent implementing the `agents.md` contract: selects scope-B fields, recommends
+  realistic MAX-extent ranges respecting couplings (clearance↔pose, reach↔arm-side, mass/friction↔grasp) + the
+  anti-coupling pose rules, and after a run diagnoses which DR fields drove failures from the per-demo HDF5 attrs
+  and APPENDS to its workbook. Tools: Read/Grep/Glob + Edit the workbook ONLY + Bash to run the small sweep
+  probe. Boundaries: it ADVISES (proposes range edits the main agent applies), NEVER auto-mutates global ranges,
+  NEVER edits robot/task/stage code, NEVER runs a full collection. **(2)** `.claude/workbooks/dr_workbook.md` —
+  seeded from the cube task + v2 (200/200 clean): a current-best-ranges table (per axis: range + confidence),
+  an append-only dated experience log (incl. the clearance-floor root-cause carried from this roadmap), and a
+  known-hard-corners list (tight clearance, far-reach, degenerate-spawn). **(3)** `genesis_firefly/dr/` package
+  (`__init__.py` + `sweep.py`) — the agent-native explore→measure probe: runs the EXISTING collector (reused
+  verbatim, fresh subprocess like `orchestrate.py` — Nyx is single-shot) on a SMALL batch (E≤24, default 12)
+  for a candidate config and reports success rate + an achieved-DIVERSITY measure (std + bbox extent of the
+  cube/bowl pose, tableZ, yaw, reach) + WHERE failures cluster (per-axis z-score). *The minimal range hook:*
+  `sample_phys_dr` now reads `DR_POSE_SCALE`/`DR_MASS_SCALE`/`DR_FRIC_SCALE` (default **1.0**) that scale only
+  the per-env range HALF-WIDTHS about their fixed centres — never moving a centre, never relaxing the cube↔bowl
+  0.125 m floor, never touching the anti-coupling sgn/arm logic. Also added the per-demo **DR plan** to the HDF5
+  (`dr_cubx/cuby/bowx/bowy/tabZ/yaw/mass_shift/clr/reach` + `dr_*_scale`) so the strategist's failure diagnosis
+  is defensible (the `DRPlan→attrs["dr"]` of `domain_randomization.md`, made real). *Verified:* **(a)** DEFAULT
+  reproducibility — `DR_*_SCALE=1 ... pickplace.py 8 7` → **8/8 grasped, 8/8 placed, through-wall 0/8,
+  penetration max 2.9 mm abnormal 0/8, max|dq|=0.098 rad** (the hooks didn't change default behaviour). **(b)**
+  the sweep tool runs end-to-end and prints a real success-rate + diversity + clustering report. **(c)** the
+  explore→measure→record loop demonstrated on ONE widened axis (`DR_POSE_SCALE=1.3`, E=12, seed 7) vs default —
+  finding + delta recorded as a dated workbook entry. *Deferred (future, not MVP):* the fully-declarative `dr/`
+  config (scopes.py/object_dr.py/sampler.py/apply.py/plan.py) replacing the hand-written `sample_phys_dr` is a
+  large refactor; the MVP advises edits to the existing ranges instead. See `agents.md` (DR strategist now
+  [BUILT — MVP]) + the workbook.

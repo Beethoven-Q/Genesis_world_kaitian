@@ -20,26 +20,45 @@ contract. It develops new reusable skills (e.g. the virtual-EE) and promotes the
 
 ---
 
-## DR strategist  `.claude/agents/dr-strategist.md`  [PLANNED]
+## DR strategist  `.claude/agents/dr-strategist.md`  [BUILT — MVP]
 The professional that applies **full domain randomization** so the main agent never re-specifies it.
+**MVP built 2026-06-19:** the agent definition, the workbook (seeded from the cube task + v2), and the
+`dr/sweep.py` probe all exist and the explore→measure→record loop has been demonstrated on a widened pose axis
+(see `roadmap.md`). The fully-declarative `dr/` config (scopes.py/object_dr.py/sampler.py/apply.py/plan.py) that
+would replace the hand-written ranges is **future work** — the MVP advises edits to the existing
+`sample_phys_dr` + stage instead.
 
 - **Role.** Given a task + its objects, (a) read the complete DR requirement set, (b) **select the relevant
   fields** — scopes **A (scene)** and **C (visual)** always apply (shared across all tasks); scope **B
-  (object/task)** by the specific objects — and (c) recommend *realistic, professional* ranges (banana
+  (object/task)** by the specific objects — and (c) recommend *realistic, MAX-extent* ranges (banana
   yellow/green not blue; apple ±10% not watermelon-sized; pose wide but task/arm/inter-object permitted, with
-  the anti-coupling rules from domain_randomization.md).
-- **Inputs.** The `TaskSpec` + `ObjectSpec`s; the DR registries (`dr/scopes.py`, `dr/object_dr.py`); its
-  **workbook**; and (after a run) the per-demo `DRPlan` + physical outcomes from the HDF5.
+  the anti-coupling rules from domain_randomization.md), modelling cross-axis couplings (clearance↔pose,
+  reach↔arm-side, mass/friction↔grasp).
+- **Inputs.** The task + its `ObjectSpec`s; **[MVP]** the hand-written ranges in
+  `tasks/pickplace.py::sample_phys_dr` + `world/manipulation_stage.py` (NOT yet a declarative `dr/scopes.py` /
+  `dr/object_dr.py`); its **workbook**; and (after a run) the per-demo **DR plan + outcomes** from the HDF5.
+  **[BUILT]** the per-demo DR plan is now real — `data/demo_<i>.attrs` carries `dr_cubx/cuby/bowx/bowy/tabZ/
+  yaw/mass_shift/clr/reach` + `dr_pose_scale/mass_scale/fric_scale` alongside the outcome attrs (`success/
+  penetrating/degenerate/has_distractors/disturbed/recovered/arm/seed`).
 - **Outputs.** (1) the selected scope-B fields + recommended ranges for this task; (2) after a run, a diagnosis
-  of *which DR fields drove failures* (the per-demo `DRPlan` makes this defensible) and an **append to the
+  of *which DR fields drove failures* (the per-demo DR plan makes this defensible) and an **append to the
   workbook**; (3) proposed range edits (human/main-agent applied).
-- **Tools / boundaries.** Read / Grep / Glob + Edit **the workbook only**. It NEVER runs sims, NEVER auto-mutates
-  the global DR registries, NEVER edits task/robot code. It advises; the main agent applies.
+- **Tools / boundaries.** Read / Grep / Glob + Edit **the workbook only** + **Bash to run the small
+  `dr/sweep.py` probe only**. It NEVER runs a full collection, NEVER auto-mutates the global ranges, NEVER edits
+  task/robot/stage code. It advises; the main agent applies.
+- **The sweep/probe tool** `dr/sweep.py`  **[BUILT — MVP]**: the agent-native way to TEST a candidate DR
+  setting to the edge of usability WITHOUT a full collection. It runs the existing collector (reused verbatim)
+  on a SMALL batch (E≤24, default 12) for a candidate config and reports **success rate + an achieved-diversity
+  measure (spread/bbox coverage of the cube/bowl poses, table height, yaw, reach) + where failures cluster**
+  (per-axis z-score of the failing envs). The candidate range is expressed as env-var **half-width multipliers**
+  the collector reads — `DR_POSE_SCALE`, `DR_MASS_SCALE`, `DR_FRIC_SCALE` (all default **1.0** → the v2
+  collection byte-for-byte; the verify gate proves the defaults didn't move). The minimal hook that lets the
+  strategist test WIDER ranges without editing the locked collector.
 - **Why a subagent.** Randomization is a deep, accumulating specialty (per object, per task). Isolating it keeps
   the main agent thin and lets the workbook compound into expertise.
 
-### The DR workbook  `.claude/workbooks/dr_workbook.md`  [PLANNED]
-Per `(task, object)` section, three parts:
+### The DR workbook  `.claude/workbooks/dr_workbook.md`  [BUILT — MVP]
+Per `(task, object)` section, three parts (seeded for cube→bowl from the v2 200/200 run):
 1. **Current best ranges** — a table of each DR field's range + a confidence level (widens as evidence grows).
 2. **Experience log** — append-only, dated entries: "run X: pose y-range 0.10 → failures at far edge; bowl too
    close to cube caused gripper-bowl bump; narrowed."

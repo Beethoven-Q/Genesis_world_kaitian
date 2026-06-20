@@ -44,16 +44,36 @@ REC_EVERY = 10                                                 # record state + 
 BOWL_OBJ = os.path.join(os.path.dirname(_HERE), "assets/objects/ycb/bowl_clean.obj")  # Nyx-safe bowl visual
 
 
+# ---- DR-STRATEGIST sweep hooks (docs/agents.md DR strategist + dr/sweep.py) -----------------------------------
+# The DR strategist EXPLORES wider/narrower ranges WITHOUT editing this file: it sets a few env-var multipliers
+# that scale the per-env range HALF-WIDTHS in sample_phys_dr. Defaults are EXACTLY 1.0, so an unset environment
+# reproduces the v2 collection byte-for-byte (the verify gate proves this). The multipliers scale ONLY the
+# half-width of each band about its FIXED centre — they never move a centre, never touch the anti-coupling sgn/
+# arm-side logic, and never relax the cube<->bowl clearance floor (so a wider pose can never spawn cube-in-bowl).
+#   DR_POSE_SCALE  -> bowl xy + cube xy half-widths (pose breadth; the main axis to push to MAX extent)
+#   DR_MASS_SCALE  -> cube mass-shift half-width
+#   DR_FRIC_SCALE  -> robot link friction-ratio half-width
+# This is the MINIMAL hook the sweep tool needs to test a candidate range to the edge of usability before the
+# main agent commits an edit to the (still hand-written) ranges above. A future fully-declarative dr/ config
+# would replace these in-line scales; for the MVP this keeps the locked collector untouched and reproducible.
+def _dr_scale(name):
+    try:
+        return float(os.environ.get(name, "1.0"))
+    except (TypeError, ValueError):
+        return 1.0
+
+
 def sample_phys_dr(N, rng, lay, spec):
     """Per-env physics DR (no visuals — the stage owns the environment/background DR)."""
     ho = lay.object_table_height
+    ps = _dr_scale("DR_POSE_SCALE")                            # pose half-width multiplier (1.0 = v2 default)
     side_is_left = rng.rand(N) < 0.5
     sgn = np.where(side_is_left, 1.0, -1.0)
     tabZ = ho + (rng.rand(N) - 0.5) * 0.10                     # object-table height +/-5cm
-    bowx = 0.40 + (rng.rand(N) - 0.5) * 0.10
-    bowy = sgn * (0.05 + (rng.rand(N) - 0.5) * 0.07)
-    cubx = 0.40 + (rng.rand(N) - 0.5) * 0.12
-    cuby = sgn * (0.185 + (rng.rand(N) - 0.5) * 0.10)
+    bowx = 0.40 + (rng.rand(N) - 0.5) * 0.10 * ps
+    bowy = sgn * (0.05 + (rng.rand(N) - 0.5) * 0.07 * ps)
+    cubx = 0.40 + (rng.rand(N) - 0.5) * 0.12 * ps
+    cuby = sgn * (0.185 + (rng.rand(N) - 0.5) * 0.10 * ps)
     # keep the cube CLEAR of the bowl so the open gripper doesn't bump the bowl on the grasp descent. The
     # MAJORITY (~80%) get a generous clearance; a MINORITY (~20%) are allowed close (hard edge cases -> useful
     # recovery data, per the DR "accept hard edge cases" rule). The 0.125 floor still forbids cube-in-bowl.
@@ -71,8 +91,8 @@ def sample_phys_dr(N, rng, lay, spec):
         if not bad.any():
             break
         nb = int(bad.sum())
-        cubx[bad] = 0.40 + (rng.rand(nb) - 0.5) * 0.12
-        cuby[bad] = sgn[bad] * (0.185 + (rng.rand(nb) - 0.5) * 0.10)
+        cubx[bad] = 0.40 + (rng.rand(nb) - 0.5) * 0.12 * ps
+        cuby[bad] = sgn[bad] * (0.185 + (rng.rand(nb) - 0.5) * 0.10 * ps)
     # GUARANTEED fallback: push any env STILL inside the hard floor radially out to exactly CLR_HARD. Direction
     # = bowl->cube (away from the bowl); if the cube sits exactly on the bowl centre, push along the arm side
     # (+sgn y) so it stays on the object table and on the correct half. This makes a cube-in-bowl spawn -- and
@@ -86,7 +106,8 @@ def sample_phys_dr(N, rng, lay, spec):
         cubx[bad] = bowx[bad] + ux * CLR_HARD
         cuby[bad] = bowy[bad] + uy * CLR_HARD
     yaw = (rng.rand(N) - 0.5) * np.radians(180)
-    mass_shift = ((rng.rand(N, 1) - 0.5) * 0.04).astype(np.float32)
+    ms = _dr_scale("DR_MASS_SCALE")                            # cube mass-shift half-width multiplier
+    mass_shift = ((rng.rand(N, 1) - 0.5) * 0.04 * ms).astype(np.float32)
     return dict(side_is_left=side_is_left, sgn=sgn, tabZ=tabZ, bowx=bowx, bowy=bowy,
                 cubx=cubx, cuby=cuby, yaw=yaw, mass_shift=mass_shift)
 
@@ -371,7 +392,11 @@ def collect(N, seed, data_dir, out_dir):
         e.set_quat(np.stack([np.cos(dy / 2), 0 * dy, 0 * dy, np.sin(dy / 2)], 1).astype(np.float32))
     try:
         cube.set_mass_shift(dr["mass_shift"])
-        robot.entity.set_friction_ratio((0.7 + 0.6 * rng.rand(N, robot.entity.n_links)).astype(np.float32))
+        # robot link friction-ratio band 1.0 +/- 0.3 (DR_FRIC_SCALE scales the half-width; clamp >=0 so a wide
+        # sweep can't request negative friction). Default scale 1.0 -> the v2 0.7..1.3 band, byte-for-byte.
+        fs = _dr_scale("DR_FRIC_SCALE")
+        fric = (1.0 + (rng.rand(N, robot.entity.n_links) - 0.5) * 0.6 * fs).clip(0.0)
+        robot.entity.set_friction_ratio(fric.astype(np.float32))
     except Exception as e:
         print(f"[COLLECT] mass/fric DR skipped: {e}", flush=True)
     # Lower each distractor's CoM below its geometric centre so it SELF-RIGHTS and rests stably instead of slowly
@@ -774,6 +799,21 @@ def collect(N, seed, data_dir, out_dir):
             d.attrs["disturbed"] = bool(disturbed[e])
             d.attrs["recovered"] = bool(recovered[e])
             d.attrs["recovery_attempts"] = int(recovery_attempts[e])
+            # PER-DEMO DR PLAN (the ``DRPlan`` of docs/domain_randomization.md, made traceable): the exact
+            # per-env physics-DR VALUES this demo sampled, plus the sweep multipliers in force. This is what
+            # makes the DR strategist's failure diagnosis DEFENSIBLE -- it can correlate an outcome (success/
+            # penetrating/degenerate) with WHERE in the DR space the env landed (cube/bowl pose, table height,
+            # mass, yaw, reach), and measure the achieved DIVERSITY. Prefixed ``dr_`` so it never collides with
+            # the outcome attrs above. Values are arm-frame: cube/bowl y are signed by the active arm side.
+            d.attrs["dr_cubx"] = float(cubx[e]); d.attrs["dr_cuby"] = float(cuby[e])
+            d.attrs["dr_bowx"] = float(bowx[e]); d.attrs["dr_bowy"] = float(bowy[e])
+            d.attrs["dr_tabZ"] = float(tabZ[e]); d.attrs["dr_yaw"] = float(yaw[e])
+            d.attrs["dr_mass_shift"] = float(dr["mass_shift"][e, 0])
+            d.attrs["dr_clr"] = float(np.hypot(cubx[e] - bowx[e], cuby[e] - bowy[e]))  # cube<->bowl centre dist
+            d.attrs["dr_reach"] = float(np.hypot(cubx[e], cuby[e]))                    # cube dist from arm base
+            d.attrs["dr_pose_scale"] = _dr_scale("DR_POSE_SCALE")
+            d.attrs["dr_mass_scale"] = _dr_scale("DR_MASS_SCALE")
+            d.attrs["dr_fric_scale"] = _dr_scale("DR_FRIC_SCALE")
             for nm in ("cam_side", "cam_lw", "cam_rw"):        # the sensor-only policy stream
                 vid = np.stack([cam_steps[nm][t][e] for t in range(Tr)])
                 iio.imwrite(os.path.join(vdir, nm, f"demo_{e}.mp4"), vid, fps=12, codec="libx264")
