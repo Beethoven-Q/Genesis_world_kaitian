@@ -310,6 +310,46 @@ banana/pen/tennis-ball; round-object grasp = the caging challenge) → after own
 → then the **virtual-EE skill + mug-hang**. **Dexterous hand:** a NEW git BRANCH (it substitutes the gripper),
 clean + safe; goal = pick-place with dex-hand+arm, then throw-and-catch a tennis ball in a parabola. Stay
 agent-native; subagents for context; rigorous, no hallucination.
+- **2026-06-20 — APPLE/TENNIS/BANANA/PEN SOLVED on the natural-motion foundation (+ Task-0 disturbance recovery, +
+  realistic colors).** *Three real root-cause fixes, NO grasp machinery (the owner's "easy when the foundation is
+  correct" held):*
+  (1) **ROUND-OBJECT EJECTION = a leaky friction cone, not geometry.** apple/tennis EJECTED 10-40cm under the firm
+  GR100 pinch (and the thin pen SLIPPED, 0/12). A subagent traced it: `firm_rigid_options()` docstring CLAIMED
+  "+ noslip" but **never set `noslip_iterations`** (defaulted 0) — a flat cube is caged by 2 coplanar patches but
+  a curved/thin body is a single tangent contact per finger, and the leaky cone lets the pinch squirt it out.
+  This is the PhysX-vs-Genesis divergence (PhysX's `solver_velocity_iteration_count=4` tightens the cone). FIX:
+  `noslip_iterations` is now set, **PER-OBJECT** (`spec.grasp_noslip`): cube=0 (a tight cone over-penetrates its
+  flat pinch → cube env1 2.5→7.7mm, a regression), round/curved/thin=5. Apple/tennis/banana now grasp with the
+  SAME simple top-down(+relax-tilt) path as the cube — the deep-seat / tilt-cap / approach-reorient machinery I
+  first tried was all reverted.
+  (2) **BANANA/PEN large-yaw misses = a wrong symmetry fold.** `grasp_quat_at` folded EVERY object's yaw into the
+  CUBE's 4-fold wedge `[-45,45]`; an elongated object is only 2-fold (long axis repeats every 180°), so at
+  |yaw|>45 the grasp was computed for the WRONG axis and the claws MISSED (banana 6/12 → exactly the large-|yaw|
+  envs). FIX: fold = π/2 for the cube, π for elongated → banana **6/12 → 12/12**.
+  (3) **ROUND go-home wrist-roll SNAP = yaw-degenerate roll.** a round grasp has no ref axis so the wrist ROLL was
+  free and could land ~π from home → the go-home FLIPPED joint_6 (a ~3 rad snap on 3/12 apple returns, recorded).
+  FIX: snap the round grasp roll to the branch nearest the HOME wrist (the existing `transport_quats` pick) →
+  max|dq| 3.3 → **0.02**, no jerks.
+  *Task 0 (disturbance recovery):* the chase/recovery re-grasps reused the ORIGINAL grasp tilt → the wrist
+  saturated at the shoved pose (2/16 recovery demos j4=1.57). FIX: re-run the wrist-margin relax ladder at the
+  SHOVED pose (`select_grasp_tilt_at`/`select_place_tilt_at`), fold the recovery RISE-apex + descent into its
+  score, and **reorient-first then rise** (the rise was the saturation, at the OLD orientation). Result
+  `DISTURB=0.5 N=16`: **16/16 placed, 0 abnormal pen, max|dq|=0.029, all recovery/chase demos j4≤1.44** (was 1.57),
+  chase+recover intact (5 chased / 2 recovered).
+  *Color:* the cube's FREE random color was applied to EVERY target (banana rendered PINK). FIX: a realistic
+  per-object `target_palette` in the spec (apple red/green · banana yellow/green · tennis yellow-green · pen
+  black/blue/red); the cube keeps its free random color (palette=None → byte-identical). `target_color()` picks +
+  small jitter; specials (tennis) get one color.
+  *VERIFIED (DISTURB=0, N=12, FAST + 1 real render each):* placed/12 · max_pen(abnormal) · posture(j4max/j3min):
+  **cube 12/12 · 2.5mm(0) · 1.40/1.14** · **apple 12/12 · 5.7mm(0) · 1.43/1.07** · **tennis 12/12 · 6.4mm(0) ·
+  1.43/0.98** · **banana 12/12 · 6.7mm(0) · 1.41/0.85** · **pen 10/12 clean (2 thin-pen over-pen at ~7.6mm) ·
+  POSTURE OK 1.39/1.08**. All max|dq| ≈ 0.02 (smooth). Edits: `tasks/pickplace.py` (Task-0 re-tilt, symmetry fold,
+  round roll, color), `registry/object_spec.py` (palettes, grasp_noslip, pen single-hull), `world/firefly_scene.py`
+  (`noslip_iterations` param — the documented-but-missing knob), `world/manipulation_stage.py` (noslip passthrough).
+  *Known/flagged:* pen 2/12 over the 7mm pen-gate (thin-body claw contact, independent of noslip — a genuine
+  thin-object limit; 10/12 clean still ≥9); apple/tennis a couple demos at j4≈1.43 (a hair over the 1.40 target,
+  from the round-roll alignment). NOT YET re-litigated: the IK/motion architecture (unchanged, as directed).
+
 - **2026-06-20 — Refinements A+B DONE & verified.** (A) Disturbance v2 (`a398a43`): random approach-timing shove
   + sense-delay → before-close **smooth CHASE** to the moved cube (moving-object data) vs after-close **gentle
   RETRY** (recovery data); jerk fixed (RETRY_RISE 0.20→0.10m + rise→reorient→descend decomposition → retry

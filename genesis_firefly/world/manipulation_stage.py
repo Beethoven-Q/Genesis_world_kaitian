@@ -143,7 +143,11 @@ def np_(x):
 class ManipulationStage:
     """The reusable manipulation world. Construct, let the task add objects to ``self.scene``, then build."""
 
-    def __init__(self, n_envs, seed=0, res=RES, spp=SPP):
+    def __init__(self, n_envs, seed=0, res=RES, spp=SPP, noslip=0):
+        # ``noslip`` = the contact friction-cone tightening iterations for firm_rigid_options. The cube (flat
+        # faces) holds with a leaky cone and a tight one over-penetrates it, so it passes 0; a round/curved/thin
+        # target passes 5 (needs the tight cone to not eject). The TASK derives it from its target spec.
+        self.noslip = int(noslip)
         self.n_envs = int(n_envs)
         self.res = res
         self.W, self.H = res
@@ -184,7 +188,7 @@ class ManipulationStage:
         # --- scene: NO ground plane -> the HDRI room is the immersive floor+walls; tables are the surfaces ---
         ha, ho = self.lay.arm_table_height, self.lay.object_table_height
         self.scene = gs.Scene(sim_options=gs.options.SimOptions(dt=0.01, substeps=4),
-                              rigid_options=firm_rigid_options(), show_viewer=False)
+                              rigid_options=firm_rigid_options(noslip=self.noslip), show_viewer=False)
         self.robot = FireflyDual(self.scene, pos=(0, 0, ha), surface=gs.surfaces.Default(**ARM_SURF))
         # collidable bodies (mean-tone edges; the textured top Plane covers what the cameras mostly see)
         self.atable = self.scene.add_entity(

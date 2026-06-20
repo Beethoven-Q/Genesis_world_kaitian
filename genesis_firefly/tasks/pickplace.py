@@ -327,6 +327,21 @@ def _spawn_distractor_entity(scene, spec, pos_xy, z):
         material=mat, surface=gs.surfaces.Plastic(color=col, roughness=0.5))
 
 
+def target_color(spec, free_color, rng):
+    """The GRASP TARGET's render colour. If the spec has a REALISTIC ``target_palette`` (apple red/green, banana
+    yellow/green, pen black/blue/red, tennis yellow-green), pick ONE palette entry and add a SMALL per-channel
+    jitter (+/-0.04) for natural variation -- a single-entry palette (tennis ball) thus stays its one true colour.
+    If the spec has NO palette (the cube), return the task's FREE distinct-from-table colour so the cube
+    collection is byte-for-byte. This is the FIX for the bug where the cube's free random colour was applied to
+    EVERY target (the PINK/blue banana). Specials get small/no DR (the palette IS the randomization)."""
+    pal = getattr(spec, "target_palette", None)
+    if not pal:
+        return free_color                                       # cube: keep the free random distinct colour
+    base = np.asarray(pal[int(rng.randint(len(pal)))], float)
+    jit = (rng.rand(3) - 0.5) * 0.08                            # +/-0.04 per channel -> subtle natural variation
+    return tuple(np.clip(base + jit, 0.0, 1.0).tolist())
+
+
 def spawn_target(scene, spec, color, pos_xy=(0.40, 0.18), z=0.30):
     """Spawn the GRASP TARGET as a real collidable rigid body with a FAITHFUL grasp collider + a Nyx-safe visual.
     The target is the one object that gets GRASPED, so (unlike a distractor) its USD-mesh collider is a convex
@@ -410,7 +425,10 @@ def collect(N, seed, data_dir, out_dir, target=None):
     target = TARGET if target is None else target
     if target not in REGISTRY:
         raise SystemExit(f"unknown TARGET '{target}' (choose from {sorted(REGISTRY)})")
-    stage = ManipulationStage(N, seed=seed)                   # the reusable robot+cameras+rendering+env-DR setup
+    # PER-OBJECT contact noslip: the flat-faced cube holds with a leaky cone (and a tight one over-penetrates it),
+    # so it uses 0; a round/curved/thin target needs the tight cone (5) to not eject/slip. Derived from the spec.
+    _noslip = int(getattr(REGISTRY[target], "grasp_noslip", 5))
+    stage = ManipulationStage(N, seed=seed, noslip=_noslip)   # the reusable robot+cameras+rendering+env-DR setup
     # ``spec`` is the CONFIGURABLE grasp target (default cube; TARGET env var selects any registry object). The
     # variable below stays named ``cube`` so the ~600 lines of locked grasp/score/disturbance logic that reference
     # it are unchanged -- it is the TARGET entity, which the orientation-aware grasp handles via spec.ref-axis.
@@ -421,9 +439,16 @@ def collect(N, seed, data_dir, out_dir, target=None):
     dr = sample_phys_dr(N, rng, lay, spec)
 
     # --- task objects: the coloured TARGET + a convex-decomposition bowl, distinct from the table colour ---
-    ch, cube_col = stage.distinct_object_color()
+    # COLOUR (owner: a banana rendered PINK -- WRONG): the GRASP TARGET's colour comes from its REALISTIC
+    # per-object palette (spec.target_palette) -- a banana is yellow (mostly) or green (unripe), an apple red or
+    # green, a pen a normal marker colour, a tennis ball yellow-green. This FIXES the bug where the cube's FREE
+    # random distinct-from-table colour (``cube_col``) was applied to EVERY target. The CUBE has no palette
+    # (target_palette=None) so it keeps its free random colour -> the cube collection stays byte-for-byte. The
+    # bowl always uses a free distinct colour (it is a container, not a realistically-coloured object).
+    ch, cube_col = stage.distinct_object_color()                 # the cube's free random colour (+ a hue to avoid)
+    tgt_col = target_color(spec, cube_col, stage.rng)            # realistic palette colour (cube -> cube_col)
     _, bowl_col = stage.distinct_object_color(ch)
-    cube = spawn_target(stage.scene, spec, cube_col, pos_xy=(0.40, 0.18), z=0.30)   # the TARGET entity
+    cube = spawn_target(stage.scene, spec, tgt_col, pos_xy=(0.40, 0.18), z=0.30)   # the TARGET entity
     bowl = stage.scene.add_entity(gs.morphs.Mesh(file=BOWL_OBJ, convexify=True,
                                   decompose_object_error_threshold=0.04, decimate=False),
                                   material=gs.materials.Rigid(rho=400.0, friction=1.0),
@@ -606,7 +631,7 @@ def collect(N, seed, data_dir, out_dir, target=None):
     # cube only needs to rise >3cm to count as grasped) and matches RoboLab's gentle milestone lift (its
     # pick_place_cube.py uses 0.07). Combined with the wrist-margin grasp TILT below, the wrist stays well off
     # its limit and the elbow stays bent through the WHOLE pick + lift + carry. Override with LIFT_H to tune.
-    APP = 0.12
+    APP = float(os.environ.get("APP_H", "0.12"))
     LIFT = float(os.environ.get("LIFT_H", "0.10"))
     # PAPP = the carry-hover / retreat height ABOVE the bowl. Lowered from 0.08 to 0.06: the carry hover sits on
     # the same low table, so a tall hover climbs the EE into the wrist-saturating region (the carry was the
@@ -660,11 +685,27 @@ def collect(N, seed, data_dir, out_dir, target=None):
         at-base-level) workspace where a pure top-down lift is near-singular. The per-env tilt is chosen by
         ``select_grasp_tilt`` below (prefer top-down; relax to the smallest tilt that stays wrist-comfortable)."""
         s = "left" if side_is_left[i] else "right"
-        yr = ((yaw[i] + np.pi / 4) % (np.pi / 2)) - np.pi / 4
+        # Fold the in-plane yaw into the object's SYMMETRY wedge before building the reference axis. The CUBE is
+        # 4-fold symmetric (a face repeats every 90deg) -> fold to [-45,45]. An ELONGATED object (banana/pen) is
+        # only 2-fold symmetric about its LONG axis (the line repeats every 180deg) -> fold to [-90,90]; folding
+        # it into the cube's 45deg wedge computed the grasp for the WRONG axis and the claws MISSED the banana at
+        # |yaw|>45 (verified: collector banana failures were exactly the large-|yaw| envs). A ROUND object has no
+        # axis (laxis is None) so the fold is irrelevant. fold = pi/2 (cube) or pi (elongated).
+        fold = (np.pi / 2) if spec.is_cube else np.pi
+        yr = ((yaw[i] + fold / 2) % fold) - fold / 2
         qzr = np.array([np.cos(yr / 2), 0.0, 0.0, np.sin(yr / 2)])
-        return orientation_aware_grasp_quat(world_long_axis(laxis, qzr),
-                                            tilted_base_quat(np.array([cx, cy]) - base[s], float(tilt_deg)),
-                                            reference_R=htR[s])
+        base_q = tilted_base_quat(np.array([cx, cy]) - base[s], float(tilt_deg))
+        gq = orientation_aware_grasp_quat(world_long_axis(laxis, qzr), base_q, reference_R=htR[s])
+        if laxis is None:
+            # ROUND object (no preferred grasp axis): the wrist ROLL is FREE, so orientation_aware_grasp_quat
+            # returned base_q WITHOUT aligning the roll. Left free, the roll varies with the reach direction and
+            # can land ~pi from the HOME wrist roll -> the carry inherits it and the go_home then FLIPS joint_6
+            # (a ~3rad snap on the empty return, verified on 3/12 apple demos). Snap the round grasp roll to the
+            # branch CLOSEST to the home wrist orientation (same branch-pick transport_quats uses), so the whole
+            # pick->carry->home chain stays near the home roll and joint_6 never flips. (No-op for cube/elongated,
+            # whose roll is already determined by their ref axis -> their motion is unchanged.)
+            gq = transport_quats(gq, reference_quat=_wxyz_from_R(htR[s]))[0]
+        return gq
 
     # ---- WRIST-MARGIN-AWARE grasp tilt selection (the RoboLab-faithful natural-posture fix) -------------------
     # WHY: RoboLab's pick-place is NATURAL because ``plan_pick_place`` PREFERS top-down but RELAXES to the
@@ -680,7 +721,12 @@ def collect(N, seed, data_dir, out_dir, target=None):
     # wrist1 OFF its limit (|j4| <= WRIST_LIMIT - WRIST_MARGIN) at the lifted pose (the binding frame; the grasp
     # is already comfortable). This uses the SAME batched Genesis IK as the run (no IK-solver change, no
     # per-env loop in the hot path), so the batched parallel structure + the proven solver stay intact.
-    _GRASP_TILT_STEPS_DEG = (0.0, 8.0, 16.0, 24.0, 32.0, 40.0)   # prefer top-down; relax toward the reach dir
+    # Per-object CAP on the relax ladder (MAX_TILT env / spec.max_grasp_tilt_deg). Default 40 = the full ladder,
+    # used by EVERY object now -- the round-object ejection that once forced a 0-cap is fixed at the source
+    # (noslip_iterations in firm_rigid_options), so apple/tennis relax-tilt exactly like the cube. Kept as a knob
+    # for ablation; restricts the ladder only, never the SCORING.
+    _MAX_TILT = float(os.environ.get("MAX_TILT", getattr(spec, "max_grasp_tilt_deg", 40.0)))
+    _GRASP_TILT_STEPS_DEG = tuple(t for t in (0.0, 8.0, 16.0, 24.0, 32.0, 40.0) if t <= _MAX_TILT + 1e-6)
     WRIST_LIMIT = 1.57                                      # joint_4 (wrist1) hard limit (URDF)
     WRIST_MARGIN = float(os.environ.get("WRIST_MARGIN", "0.17"))   # keep |j4| <= 1.40 -> >=0.17 off the limit
     ELBOW_MIN = float(os.environ.get("ELBOW_MIN", "1.05"))   # keep j3(elbow) >= this (bent; home 2.30, limit [0,3.14])
@@ -870,32 +916,50 @@ def collect(N, seed, data_dir, out_dir, target=None):
                   f"empty={empty_close.tolist()} no_rise={did_not_rise.tolist()}", flush=True)
         return did_not_rise | empty_close
 
-    def approach_close_lift_wps(start_p, start_q, rise_p, cx, cy, env_i):
+    def approach_close_lift_wps(start_p, start_q, rise_p, cx, cy, env_i, regrasp_tilt=None):
         """Build a SMOOTH, singularity-robust re-grasp at the cube's CURRENT pose (cx,cy) FROM the arm's current
         pose -- the ONE builder for BOTH the CHASE pivot and the RETRY re-grasp. ``env_i`` selects the per-env
         arm side / yaw for the grasp quat.
 
+        ``regrasp_tilt`` (TASK 0 fix): the grasp tilt to use AT the shoved pose. When the cube is shoved to a NEW
+        pose, the ORIGINALLY-planned ``grasp_tilt[env_i]`` (chosen for the OLD pose) can SATURATE the wrist at the
+        new reach (verified: DISTURB=0.5 -> 2/16 recovery demos hit j4=1.57). So the caller RE-RUNS the
+        wrist-margin relax-ladder (``select_grasp_tilt_at``) at the shoved (cx,cy) and passes the result here;
+        ``None`` falls back to the original tilt (used by no current call site, kept for safety).
+
         Smoothness fix (the v1 ~0.20 rad jerk): the re-grasp must change BOTH the wrist orientation (to the new
         orientation-aware grasp quat ``gqi``, re-tilted toward the moved cube) AND the position. Doing both in ONE
         rise->pre segment let the warm-started IK cross a branch near the top of the rise (a near-singularity
-        spike). We DECOMPOSE it: (1) rise straight up keeping the CURRENT orientation (pure translation), (2)
-        REORIENT to ``gqi`` at the apex as a pure rotation (densify dwells the position + SLERPs -- the arm is
-        most dexterous here, elbow bent, well clear of the table), (3) descend to ``pre`` keeping ``gqi`` (pure
-        translation), then the locked at->at->close->lift. Each segment is now either pure-translation or
-        pure-rotation, so the IK never has to flip a branch -> every step stays C1-continuous (<~0.10 rad)."""
+        spike). We DECOMPOSE it into pure-translation / pure-rotation segments so the IK never flips a branch.
+
+        TASK-0 ORDER FIX (the recovered-demo j4=1.57 saturation): the rise to the apex is a HIGH EE pose, and a
+        recovery at a HIGH table already starts the close near EEz~0.44 -- a +10cm rise reaches EEz~0.56 where a
+        steep (old) top-down orientation SATURATES the wrist (verified: the j4=1.57 spike is on the RISE, at the
+        OLD orientation, not the descent). So we REORIENT FIRST -- at the LOW start pose, where the arm has the
+        most wrist/elbow margin -- to the re-selected comfortable tilt ``gqi``, THEN rise at that new orientation,
+        THEN descend. The high-EE rise now happens at the relaxed tilt (off the wrist limit), and the reorient
+        happens low. We ALSO cap the apex EE height (rise only enough to clear the cube for a clean re-descend, not
+        into the saturation band). Each segment is still pure-translation or pure-rotation (no branch flip)."""
         gci = np.array([cx, cy, cube_rest_z[env_i] + grasp_dz])
-        gqi = grasp_quat_at(env_i, cx, cy, grasp_tilt[env_i])   # reuse the wrist-margin tilt for the re-grasp too
+        tlt = float(grasp_tilt[env_i] if regrasp_tilt is None else regrasp_tilt)
+        gqi = grasp_quat_at(env_i, cx, cy, tlt)                 # re-selected wrist-margin tilt at the shoved pose
         tzi = _R_from_wxyz(gqi) @ np.array([0, 0, 1.0])
-        apex = rise_p.copy()                                       # the rise apex (above the new cube)
+        # CAP the apex: rise only enough above the cube to clear it for the re-descend (RETRY_RISE), but never so
+        # high that the EE climbs into the wrist-saturation band. The apex tool-z is capped at the cube grasp z +
+        # a modest clearance so EEz stays comfortable even at a high table (the over-stretch ceiling fix, applied
+        # to the recovery rise). The reorient-first order means even this rise is at the relaxed tilt.
+        apex = rise_p.copy()
+        apex[2] = min(float(rise_p[2]), float(gci[2]) + RETRY_RISE)   # never above cube_grasp_z + RETRY_RISE
+        reorient_p = start_p.copy()                                   # reorient at the LOW start pose (max margin)
         return [
-            ("start",   start_p,             start_q, OPEN),
-            ("rise",    rise_p,              start_q, OPEN),        # (1) pure-translation rise (keep orientation)
-            ("reorient", apex,               gqi,     OPEN),        # (2) pure-rotation reorient at the apex
-            ("pre",     gci - APP * tzi,     gqi,     OPEN),        # (3) pure-translation descend to pre-grasp
-            ("at",      gci,                 gqi,     OPEN),
-            ("at",      gci,                 gqi,     OPEN),
-            ("close",   gci,                 gqi,     CLOSE),
-            ("lift",    gci + [0, 0, LIFT],  gqi,     CLOSE),
+            ("start",    start_p,            start_q, OPEN),
+            ("reorient", reorient_p,         gqi,     OPEN),        # (1) pure-rotation reorient LOW (most dexterous)
+            ("rise",     apex,               gqi,     OPEN),        # (2) pure-translation rise at the NEW tilt
+            ("pre",      gci - APP * tzi,    gqi,     OPEN),        # (3) pure-translation descend to pre-grasp
+            ("at",       gci,                gqi,     OPEN),
+            ("at",       gci,                gqi,     OPEN),
+            ("close",    gci,                gqi,     CLOSE),
+            ("lift",     gci + [0, 0, LIFT], gqi,     CLOSE),
         ], gqi
 
     Tlist = []
@@ -947,6 +1011,65 @@ def collect(N, seed, data_dir, out_dir, target=None):
         return tilt
     place_tilt = select_place_tilt()
 
+    # ---- TASK 0: RE-SELECT the grasp/place tilt AT the SHOVED cube pose for the disturbance chase/recovery -----
+    # The chase (seg2) + recovery (seg3) re-grasp the cube at its NEW (shoved) pose. Reusing the ORIGINAL
+    # ``grasp_tilt``/``place_tilt`` (chosen for the OLD pose + OLD reach) can SATURATE the wrist there (verified:
+    # DISTURB=0.5 N=16 -> 2/16 recovery demos j4=1.57). FIX: re-run the EXACT SAME wrist-margin relax-ladder
+    # (same WRIST_LIMIT/WRIST_MARGIN/ELBOW_MIN, same warm-start pre+lift / carry probe -- the SCORING is
+    # unchanged) at the shoved grasp centre / re-grasp orientation, per env. These are single-env wrappers around
+    # the same batched ``solve()`` probe used by select_grasp_tilt/_carry_posture (no IK-solver change, the
+    # relax policy is identical), so the re-grasp stays as natural as the first grasp.
+    def _posture_at_pick_env(env_i, gci, tilt_deg, apex_z=None):
+        """Single-env (gq, |j4|, j3) over the PICK binding frames at grasp centre ``gci`` and the given tilt -- the
+        env_i row of ``_posture_at_pick``, so the SCORING is byte-identical. ``apex_z`` (the recovery rise apex
+        height): the recovery/chase re-grasp does rise->REORIENT-at-apex->descend->close->lift, so the high apex
+        REORIENT (top-down at high EEz) is ALSO a binding frame that can saturate the wrist (the same high-EE
+        saturation the lift fix addressed). When given, the apex pose at ``gqi`` is folded into the worst-case so
+        the relax ladder picks a tilt comfortable AT THE APEX too -- otherwise the probe (pre+lift only) approves
+        a tilt that the recovery's apex reorient still saturates (the 2026-06-20 recovered-demo j4=1.57 bug)."""
+        gq = grasp_quat_at(env_i, gci[0], gci[1], float(tilt_deg)).astype(np.float64)
+        tz = _R_from_wxyz(gq) @ np.array([0, 0, 1.0])
+        gcN = np.tile(np.asarray(gci, float), (N, 1))          # broadcast to the batched solve (we read row env_i)
+        gqN = np.tile(gq, (N, 1))
+        pre = gcN.copy(); pre -= APP * tz
+        lift = gcN.copy(); lift[:, 2] += LIFT
+        qpre = solve(pre, gqN); solve(gcN.copy(), gqN); qlift = solve(lift, gqN)   # warm pre->grasp->lift chain
+        j4 = max(abs(float(qpre[env_i, 3])), abs(float(qlift[env_i, 3])))
+        j3 = min(float(qpre[env_i, 2]), float(qlift[env_i, 2]))
+        if apex_z is not None:                                  # the recovery rise+reorient apex (high EE) frame
+            # the recovery does reorient@apex -> descend(pre) -> at(gci). The wrist trajectory along the steep
+            # descent is NON-monotonic and can PEAK between the (checked) apex/pre endpoints, so we also probe a
+            # couple of DESCENT samples (apex, 2/3-down, pre) at gq -- the worst of these binds the relax ladder.
+            apexN = gcN.copy(); apexN[:, 2] = float(apex_z)
+            mid = 0.5 * (apexN + pre)                           # apex->pre descent midpoint (the real recovery path)
+            for wp_ in (apexN, mid, pre):                       # warm chain apex -> mid -> pre (the real descent)
+                qd = solve(wp_, gqN)
+                j4 = max(j4, abs(float(qd[env_i, 3])))
+                j3 = min(j3, float(qd[env_i, 2]))
+        return gq, j4, j3
+
+    def select_grasp_tilt_at(env_i, gci, apex_z=None):
+        """Smallest of _GRASP_TILT_STEPS_DEG keeping |j4|<=limit-margin AND j3>=ELBOW_MIN through the pick at the
+        SHOVED grasp centre ``gci`` -- the per-env relax ladder of ``select_grasp_tilt`` (identical thresholds).
+        ``apex_z`` folds the recovery/chase rise-apex reorient into the worst-case (see _posture_at_pick_env)."""
+        for t in _GRASP_TILT_STEPS_DEG:
+            _, j4, j3 = _posture_at_pick_env(env_i, gci, t, apex_z=apex_z)
+            if (j4 <= (WRIST_LIMIT - WRIST_MARGIN)) and (j3 >= ELBOW_MIN):
+                return float(t)
+        return float(_GRASP_TILT_STEPS_DEG[-1])                 # none fully clears -> the largest (most-relaxed) tilt
+
+    def select_place_tilt_at(env_i, gqi):
+        """Smallest carry tilt keeping the carry-over-bowl wrist/elbow comfortable at the re-grasp orientation
+        ``gqi`` (the carry quat re-yaws to gqi's branch) -- the per-env ladder of ``select_place_tilt``."""
+        over_bowl = bxyz.copy(); over_bowl[:, 2] += PAPP
+        for t in (8.0, 16.0, 24.0, 32.0, 40.0):
+            cqi = cquat(env_i, gqi, float(t))
+            cqN = np.tile(cqi, (N, 1)).astype(np.float64)
+            solve(bxyz.copy(), cqN); q = solve(over_bowl, cqN)
+            if (abs(float(q[env_i, 3])) <= (WRIST_LIMIT - WRIST_MARGIN)) and (float(q[env_i, 2]) >= ELBOW_MIN):
+                return float(t)
+        return 40.0
+
     def grasp_xy_now():
         """The offset-corrected GRASP-centre xy from the object's LIVE (possibly shoved) pose -- used by the
         disturbance chase/retry so the re-grasp aims at the banana's BODY, not its AABB centre in the hollow."""
@@ -954,7 +1077,11 @@ def collect(N, seed, data_dir, out_dir, target=None):
 
     def pick_wps(i):
         """home -> pre -> at -> at -> close -> lift for env i: the orientation-aware top-down approach + a FIRM
-        GR100 close (the object's own collision stops the claws; the high-kp PD holds the force) + a gentle lift."""
+        GR100 close (the object's own collision stops the claws; the high-kp PD holds the force) + a gentle lift.
+        This is OBJECT-AGNOSTIC: the cube, the round apple/tennis, and the elongated banana/pen all use this same
+        path. (Round objects USED to need a special deep-seat + reorient approach to avoid ejecting under the firm
+        pinch, but that was a symptom of the leaky friction cone -- fixed at the source by noslip_iterations in
+        firm_rigid_options; round objects now grasp top-down+tilt exactly like the cube, no special machinery.)"""
         gci = gc[i]
         tzi = _R_from_wxyz(gqA[i]) @ np.array([0, 0, 1.0])
         return [
@@ -1017,8 +1144,17 @@ def collect(N, seed, data_dir, out_dir, target=None):
         for i in range(N):
             if chased[i]:
                 sp = cur_p[i].copy(); sp[2] = max(cur_p[i, 2], cube_now[i, 2] + grasp_dz) + RETRY_RISE
-                wp, gqi = approach_close_lift_wps(cur_p[i], cur_q[i], sp, gxy_now[i, 0], gxy_now[i, 1], i)
+                # TASK 0: re-select the grasp tilt AT the shoved grasp centre (the old tilt can saturate the wrist
+                # at the new reach). Same wrist-margin relax ladder -> the chase re-grasp stays natural.
+                gci_now = np.array([gxy_now[i, 0], gxy_now[i, 1], cube_rest_z[i] + grasp_dz])
+                apex_z = min(float(sp[2]), float(gci_now[2]) + RETRY_RISE)   # the CAPPED apex (matches the builder)
+                rt = select_grasp_tilt_at(i, gci_now, apex_z=apex_z)         # fold the capped rise into the score
+                wp, gqi = approach_close_lift_wps(cur_p[i], cur_q[i], sp, gxy_now[i, 0], gxy_now[i, 1], i,
+                                                  regrasp_tilt=rt)
                 wpsA2.append(wp); gqA[i] = gqi
+                if os.environ.get("TILT_DEBUG"):
+                    print(f"[TILT_DEBUG] seg2 chase env{i}: orig grasp_tilt={grasp_tilt[i]:.0f} -> reselect={rt:.0f}"
+                          f" (shoved gci={np.round(gci_now,3).tolist()})", flush=True)
             else:
                 wpsA2.append([
                     ("start", cur_p[i],                cur_q[i], OPEN),
@@ -1041,8 +1177,18 @@ def collect(N, seed, data_dir, out_dir, target=None):
             if failed[i]:
                 recovery_attempts[i] = 1
                 sp = cur_p[i].copy(); sp[2] = max(cur_p[i, 2], np_(cube.get_pos())[i, 2] + grasp_dz) + RETRY_RISE
-                wp, gqi = approach_close_lift_wps(cur_p[i], cur_q[i], sp, gxy_f[i, 0], gxy_f[i, 1], i)
+                # TASK 0: re-select BOTH the re-grasp tilt (at the shoved grasp centre) AND the carry tilt (at the
+                # re-grasp orientation) -- same relax ladders -> the recovery re-grasp + its carry stay natural.
+                gci_f = np.array([gxy_f[i, 0], gxy_f[i, 1], cube_rest_z[i] + grasp_dz])
+                apex_z = min(float(sp[2]), float(gci_f[2]) + RETRY_RISE)   # the CAPPED apex (matches the builder)
+                rt = select_grasp_tilt_at(i, gci_f, apex_z=apex_z)        # fold the capped rise into the score
+                wp, gqi = approach_close_lift_wps(cur_p[i], cur_q[i], sp, gxy_f[i, 0], gxy_f[i, 1], i,
+                                                  regrasp_tilt=rt)
                 gqA[i] = gqi
+                place_tilt[i] = select_place_tilt_at(i, gqi)     # re-select the carry tilt at the new grasp quat
+                if os.environ.get("TILT_DEBUG"):
+                    print(f"[TILT_DEBUG] seg3 recover env{i}: orig grasp_tilt={grasp_tilt[i]:.0f} -> reselect={rt:.0f}"
+                          f" place_tilt={place_tilt[i]:.0f} (shoved gci={np.round(gci_f,3).tolist()})", flush=True)
                 wpsC.append(wp + place_tail(i, wp[-1][1], gqi))   # wp[-1] = the re-grasp's ("lift", pos, ...)
             else:
                 wpsC.append([("start", cur_p[i], cur_q[i], CLOSE)] + place_tail(i, cur_p[i], gqA[i]))

@@ -37,7 +37,29 @@ class ObjectSpec:
     local_long_axis: tuple | None = None   # PCA principal axis in the rigid-body local frame
     friction: tuple = (1.0, 0.9)
     color: tuple = (0.85, 0.15, 0.15)       # visual (procedural cuboid/sphere)
+    target_palette: tuple | None = None     # REALISTIC per-object colour palette for the GRASP TARGET render.
+    #                                     Each entry is an (r,g,b) base hue the target picks from (small jitter
+    #                                     added by the task); a one-colour palette (e.g. tennis ball yellow-green)
+    #                                     gets near-zero randomization. ``None`` (the cube) -> the task's FREE
+    #                                     distinct-from-table random colour (keeps the cube collection byte-for-
+    #                                     byte). This FIXES the bug where the cube's free random colour was applied
+    #                                     to EVERY target (a banana rendered PINK/blue); a banana now renders
+    #                                     yellow (mostly) or green (unripe), an apple red or green, a pen a normal
+    #                                     pen colour. The palette lives on the spec so the colour is per-object.
     grasp_dz: float = 0.0           # nudge the grasp point along world +Z from the geometry centre
+    grasp_noslip: int = 5           # contact friction-cone tightening iters (firm_rigid_options noslip) the firm
+    #                                 grasp of THIS object needs. A ROUND/curved/THIN body reduces to a single
+    #                                 tangent contact per finger and a leaky cone ejects/slips it, so it needs the
+    #                                 tight cone (5). The flat-faced CUBE holds WITHOUT it AND a tight cone deepens
+    #                                 its pinch over the abnormal-penetration gate, so the cube uses 0 (its locked
+    #                                 ~2.5mm). Per-object so each object's firm contact is correct (collision #1).
+    max_grasp_tilt_deg: float = 40.0    # CAP on the prefer-top-down relax ladder (select_grasp_tilt). A forward
+    #                                     tilt eases the wrist at the lift, but it also makes the claws approach a
+    #                                     ROUND body OFF-AXIS and shove it out (verified: apple/tennis EJECT 40cm
+    #                                     at tilt>=8, hold top-down). So a ROUND object caps this at 0 (stay pure
+    #                                     top-down; the deep equator seat keeps the wrist OK without a tilt). The
+    #                                     cube/elongated keep the full 40deg ladder. Per-object grasp tuning -- the
+    #                                     select_grasp_tilt SCORING is unchanged; this only restricts its ladder.
     grasp_close: float = 0.9            # driven-claw firm-pinch TARGET (GR100_CLOSE). A ROUNDED/soft body uses a
     #                                     GENTLER target (e.g. ~0.7) so the high-kp PD doesn't over-drive the claw
     #                                     into it (the >7mm penetration gate). Keep >= ~0.6 so the empty-close
@@ -96,11 +118,15 @@ class ObjectSpec:
 #                book added + Nyx-safe clean .obj meshes (apple/banana/pen) added 2026-06-19 for distractors)
 # ============================================================================ #
 REGISTRY: dict[str, ObjectSpec] = {
+    # apple (round, ~7.3cm). Grasps at its CENTRE with the cube's top-down(+relax-tilt) path -- no special
+    # depth/tilt needed once the friction cone is tight (noslip_iterations in firm_rigid_options; before that a
+    # firm pinch ejected the curved body, the 2026-06-20 round-object bug).
     "apple": ObjectSpec(
         name="apple", language_name="apple", source="usd", usd_subpath="objaverse/apple_02.usd",
         mesh_subpath="objaverse/apple_clean.obj", dist_color=(0.80, 0.12, 0.10),
         mass=0.050, extents=(0.0702, 0.0754, 0.0733), local_center=(0.0, 0.0, 0.0),
-        elongated=False, x_range=(0.34, 0.44), place_xy_tol_cm=7.0),
+        elongated=False, x_range=(0.34, 0.44), place_xy_tol_cm=7.0,
+        target_palette=((0.62, 0.06, 0.05), (0.74, 0.10, 0.07), (0.40, 0.58, 0.14))),  # deep red x2 / green (unripe)
     # banana: CURVED. The AABB centre sits in the HOLLOW of the curve (~3cm off the fruit), so a grasp at the
     # AABB centre closes on AIR. grasp_center_offset_local shifts the grasp point along the SHORT (closing) axis
     # onto the banana body (short-proj +0.030 m = the body's centre at the long-axis midpoint, MEASURED from the
@@ -112,26 +138,37 @@ REGISTRY: dict[str, ObjectSpec] = {
         mass=0.080, extents=(0.1089, 0.1784, 0.0367), local_center=(0.0, 0.0, 0.0),
         elongated=True, local_long_axis=(0.3372, 0.9414, 0.0), grasp_dz=-0.006,
         grasp_center_offset_local=(-0.0282, 0.0101, 0.0), grasp_single_hull=True, x_range=(0.34, 0.44),
-        place_xy_tol_cm=9.0),
+        place_xy_tol_cm=9.0,
+        target_palette=((0.92, 0.80, 0.15), (0.95, 0.85, 0.20), (0.62, 0.70, 0.18))),  # yellow x2 / green (unripe)
     # marker pen (dry-erase marker): very elongated, ~2cm thick. rest_offset=0.004 stops the firm claw ON the
     # surface (else it over-drives PAST the thin body and the pen lodges on a finger). release_dz lower so it
     # settles in the bowl instead of rolling off the rim.
+    # marker pen (dry-erase marker): very elongated, ~2cm thick. grasp_single_hull=True (a SMOOTH convex
+    # envelope of the thin body) so the firm claw pinches a FLAT face instead of sinking into a decomposition
+    # seam -> shallower, more uniform contact (verified: the decomp collider over-penetrated 2/12 envs at >7.5mm;
+    # the hull drops it to 1/12 and 12/12 physical placed). The thin pen still needs the tight friction cone
+    # (noslip) to hold at all -- WITHOUT it the firm pinch slips and 0/12 grasp. release_dz lower so it settles in
+    # the bowl instead of rolling off the rim.
     "pen": ObjectSpec(
         name="pen", language_name="pen", source="usd", usd_subpath="ycb/dry_erase_marker.usd",
         mesh_subpath="ycb/dry_erase_marker_clean.obj", dist_color=(0.10, 0.10, 0.12),
         mass=0.020, extents=(0.0210, 0.1208, 0.0189), local_center=(0.0, 0.0, 0.0),
-        elongated=True, local_long_axis=(-0.0303, 0.9995, 0.0), grasp_dz=0.0, rest_offset=0.004,
-        release_dz=0.03, x_range=(0.34, 0.44), place_xy_tol_cm=9.0),
+        elongated=True, local_long_axis=(-0.0303, 0.9995, 0.0), grasp_dz=0.0, grasp_single_hull=True,
+        rest_offset=0.004, release_dz=0.03, x_range=(0.34, 0.44), place_xy_tol_cm=9.0,
+        target_palette=((0.10, 0.10, 0.12), (0.12, 0.20, 0.55), (0.55, 0.12, 0.14))),  # black / blue / red marker
     "cube": ObjectSpec(
         name="cube", language_name="cube", source="cuboid", mass=0.040,
         extents=(0.05, 0.05, 0.05), local_center=(0.0, 0.0, 0.0), is_cube=True,
-        color=(0.85, 0.15, 0.15), x_range=(0.34, 0.44)),
+        color=(0.85, 0.15, 0.15), grasp_noslip=0, x_range=(0.34, 0.44)),   # flat faces hold w/o noslip; tight cone over-penetrates
     # tennis ball: regulation ~6.7cm diameter, ~57g, round (no preferred axis) -> procedural sphere; yellow-
     # green felt. Round handling like the apple (grasp at root, place tol 7cm). NEW for the Genesis 5-object gate.
+    # tennis ball (round, ~6.7cm, pure sphere collider). Grasps at its CENTRE with the cube's top-down path once
+    # the friction cone is tight (noslip_iterations) -- same round-object fix as the apple.
     "tennis_ball": ObjectSpec(
         name="tennis_ball", language_name="tennis ball", source="sphere", mass=0.057,
         extents=(0.067, 0.067, 0.067), local_center=(0.0, 0.0, 0.0), elongated=False,
-        color=(0.85, 0.95, 0.20), friction=(1.1, 1.0), x_range=(0.34, 0.44), place_xy_tol_cm=7.0),
+        color=(0.85, 0.95, 0.20), friction=(1.1, 1.0), x_range=(0.34, 0.44), place_xy_tol_cm=7.0,
+        target_palette=((0.82, 0.92, 0.22),)),                  # one colour: regulation yellow-green felt (no DR)
     # book: a flat hardcover (~18x13x3 cm, ~0.30 kg). Procedural box with a realistic dark-red cover colour;
     # high friction so it rests flat and is hard to nudge. Used as a clutter/distractor (not a grasp target
     # in pick-place), so no elongated/cube grasp hints are needed. NEW 2026-06-19 for the distractor pool.

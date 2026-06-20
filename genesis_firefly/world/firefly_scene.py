@@ -30,12 +30,33 @@ class TableLayout:
     seam_x: float = 0.13
 
 
-def firm_rigid_options(dt=0.01):
+def firm_rigid_options(dt=0.01, noslip=0):
     """The Genesis penetration fix for firm grasps: Newton solver + many iters + low constraint timeconst
-    + noslip (reproduces RoboLab's PhysX 64/4 + rest_offset firm-contact recipe)."""
+    + noslip (reproduces RoboLab's PhysX 64/4 + rest_offset firm-contact recipe).
+
+    noslip_iterations (2026-06-20 ROUND-OBJECT FIX): the docstring CLAIMED "+ noslip" but the param was never
+    actually set, so it defaulted to 0 -- the friction cone stayed soft/leaky. A flat-faced cube is caged by two
+    coplanar contact patches, but a ROUND/curved/THIN body reduces to a single tangent contact per finger, and a
+    leaky cone lets the firm GR100 pinch (GRIP_KP=200) squirt it out (verified: apple/tennis EJECT 10-40cm; the
+    thin pen slips, 0/12 grasp). This is the PhysX-vs-Genesis divergence: PhysX's velocity-iteration friction
+    solve (solver_velocity_iteration_count=4 in RoboLab) tightens the cone; the Genesis analogue is
+    noslip_iterations. Turning it on makes apple/tennis/banana/pen grasp at the SAME simple top-down(+tilt) path
+    as the cube -- NO round-grasp special machinery (deep seat / tilt cap / approach reorient).
+
+    PER-OBJECT (the caller passes ``noslip``): a tighter cone RAISES the firm-pinch contact force, which deepens
+    penetration -- the flat-faced CUBE needs NO noslip (it holds with a leaky cone) and a tight cone pushes its
+    pinch OVER the 7mm abnormal gate on the odd env (verified: cube env1 2.5mm@noslip0 -> 7.7mm@noslip2, a
+    REGRESSION). So the CUBE uses noslip=0 (its locked 2.5mm) and the round/curved/thin objects use noslip=5
+    (which holds them while their own contact stays ~6mm). The collector derives the value from the target spec
+    (cube -> 0, else -> 5); NOSLIP_ITERS env overrides for ablation."""
+    import os as _os
+    env = _os.environ.get("NOSLIP_ITERS")
+    if env is not None:
+        noslip = int(env)
     return gs.options.RigidOptions(
         dt=dt, constraint_solver=gs.constraint_solver.Newton, iterations=120,
         constraint_timeconst=0.005, enable_self_collision=True, enable_collision=True,
+        noslip_iterations=noslip,                # tighten the friction cone -> a round body doesn't squirt out
         integrator=gs.integrator.implicitfast)   # exact MuJoCo/Isaac implicit PD (the approximate default
     #                                              under-damps J5/J6 -> wrist jitter). Faithful to RoboLab.
 
