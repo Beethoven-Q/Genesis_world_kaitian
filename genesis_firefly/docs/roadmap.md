@@ -186,3 +186,26 @@ phase lands. Requirements live in [project_overview.md](project_overview.md) (bl
   grasped, 20/20 placed**, abnormal-penetration **0/20**; regression `20 1005` → T=1058, 267 s, |dq|=0.037,
   20/20, 0/20; `20 7` → T=1041, 228 s, |dq|=0.033, 20/20, 0/20. The blowup is gone and smooth motion + parity
   are preserved. See `pickplace_task_and_dataformat.md` (densify cap + degenerate guard).
+- **2026-06-19 — LEROBOT v2 EXPORT for pi0.5 (`dataio/convert_genesis_to_lerobot.py`).** *Goal:* turn the
+  full-DR `cube_fulldr_v2` collection into a fine-tunable dataset. *Decision:* the vendored
+  `dataio/lerobot_exporter.py` (RoboLab) emits **v3.0** and parses RoboLab's HDF5/`__camera`-suffixed video
+  names — **wrong format and wrong layout** for the Genesis source + for pi0.5 (which consumes **v2.1**). So I
+  wrote a **Genesis-specific converter** modeled on the proven RoboLab/OpenPI path
+  (`openpi_hex/examples/hexarm/convert_robolab_demos_to_lerobot.py`): it reads state/action from the merged
+  `demos.hdf5` `/data/demo_<i>` (`states/articulation/robot/joint_position` → `observation.state`, `actions` →
+  `action`, both 14-D) and decodes the per-camera MP4s
+  (`cam_side`→`observation.images.cam_high`, `cam_lw`→`cam_left_wrist`, `cam_rw`→`cam_right_wrist`), task
+  `"put the cube in the bowl"`, fps=12 (probed), img 640×368 (probed — the source is 368-tall, not 360).
+  *Interpreter:* the repo `.venv` has **no `lerobot`**; the proven path is the OpenPI venv
+  (`/home/kaitianchao/Projects/openpi_hex/.venv`, `lerobot==0.1.0`, `CODEBASE_VERSION=v2.1`) — used that.
+  *success_only gate:* ship a demo only if `success AND not penetrating AND not degenerate` → **200/200** (the
+  v2 collection is already 100 % clean). *Output:* `/data3/genesis_fulldr/lerobot/genesis_cube_fulldr_v2/`
+  (575 MB, off-repo) + `output/genesis_cube_fulldr_v2` preview symlink. *Verified:* `LeRobotDataset(...)` loads
+  it — `total_episodes=200`, `total_frames=21460`, `fps=12`, `tasks={0:'put the cube in the bowl'}`; `ds[0]` and
+  a mid-dataset sample (ep 99) both yield `observation.state (14,) f32`, `action (14,) f32`, three images
+  `(3,368,640) f32`. info.json `features` lists exactly the 3 cams + named 14-D state/action. *Note:* lerobot
+  0.1.0 encodes the videos as **AV1** (`video.codec: "av1"`); torchvision/pyav decode them fine (the loader
+  decoded all 3 streams in verification) — same as the RoboLab pipeline produces. *Next:* clone
+  `pi05_hexarm_bowl_lora` → `pi05_genesis_cube_lora` (set LeRobot `repo_id="genesis_cube_fulldr_v2"`; the 14-D
+  HexArm transforms + cam names are unchanged) → `compute_norm_stats` → fine-tune pi0.5. Full how-to:
+  `lerobot_export.md`.
