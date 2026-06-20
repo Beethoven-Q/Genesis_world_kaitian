@@ -66,38 +66,130 @@ the AND of penetration PASS + stability PASS (+ hollow PASS if a probe was given
 
 ## The `RefineReport`
 `MeshStats` (augment) + `PhysicsInfer` (infer) + `CollisionModel` (collision) + a list of `Verdict`s (verify) +
-`keypoints` + `sim_ready`. `report.pretty()` prints the human report; `report.to_dict()` is the JSON record.
+`keypoints` + `sim_ready`. **v2 fields (2026-06-20):** `collider_views` (view_name → saved PNG path),
+`detected_keypoints` (geometry-detected `name → {center, normal, [radius], method, verified}`), and
+`semantic_links` (PartNet raw link → `{semantic, role, evidence, confidence, verified}`). `report.pretty()`
+prints the human report; `report.to_dict()` is the JSON record.
 
 ## Keypoints (the trackable feature frames)
 The refiner labels feature frames into `ObjectSpec.keypoints` (added 2026-06-19) — LOCAL-frame
 `name -> {center, normal, [radius]}`. These are the frames a skill like the **virtual-EE** controls (thread a
 ring onto a branch, seat a cap, peg a hole). The mug's `handle_ring` (center + normal = the branch axis +
-radius) is the future mug-hang controlled frame; `cup_opening` is the future "drop into / pour" frame.
+radius) is the future mug-hang controlled frame; `cup_opening` is the future "drop into / pour" frame. As of v2
+the refiner DETECTS these from geometry (`detect_keypoints`) and VERIFIES each before baking — see below.
+
+---
+
+# Object-refiner **v2** (2026-06-20) — multi-view collider check · verified virtual keypoints · PartNet naming
+
+Three additions (owner directive, roadmap §B). All grounded in MEASUREMENT — a label is baked only when a
+geometric/in-sim test confirms it (a wrong part-name/keypoint misleads the task solver — the worst outcome).
+
+## 1. Multi-view COLLIDER render — the FINAL visual collision check
+`refine.render_collider_views(visual_obj, out_dir, n_views=6, ...) -> {view: png_path}` (also auto-run inside
+`refine(..., render_collider=True)`). It loads the object with the convex-DECOMPOSITION collider, reads each
+collision hull (`entity.geoms[i].get_trimesh()` at its world pose), tints each a distinct colour, and renders
+the HULLS from 6 canonical viewpoints (`front/back/left/right/top/perspective`) via Nyx. The PNGs are SAVED
+**next to the asset** — e.g. `assets/objects/ycb/mug_collider_views/{front,…,top}.png`.
+
+*Why we bake the hulls (not `vis_mode="collision"`):* Nyx renders only VISUAL geometry (it exports
+`entity.vgeoms`, ignoring `surface.vis_mode`), so to render the COLLIDER through Nyx we re-export the hulls as a
+per-hull-coloured visual mesh and render THAT. (The rasterizer DOES honour `vis_mode="collision"` — that path
+made the arm/camera collider render — but Nyx, our photoreal path, does not.)
+
+These are the FINAL collision check, inspected ALONGSIDE the existing penetration + stability + hollow-probe
+gates: open the views and confirm **hollow stays hollow** (the handle ring is an open loop you see through; the
+cup mouth is an open cavity from the top) and **solid never fills** (the body is tiled with solid hulls, no hull
+plugs a hollow feature). The owner can open the same PNGs to verify. Scratch per-hull OBJs are written to a temp
+dir and deleted after rendering — only the 6 PNGs remain.
+
+## 2. Keypoint/part labeling as VIRTUAL, physics-less annotations
+**Detection (`refine.detect_keypoints(mesh_path) -> {name: {...}}`, pure trimesh, general — never guesses):**
+- `handle_ring` — sweeps thin slabs along each axis for a **fully-encircled (8/8 sectors) hole**, then keeps
+  only TRUE **tunnels**: a ray along the hole normal must EXIT the mesh on BOTH sides (a stick threads clean
+  through). This discriminates a handle ring from a cup CAVITY (whose bottom blocks one ray side → not a tunnel).
+  The smallest such tunnel, clustered across adjacent slabs, is the ring; its normal is the branch/thread axis.
+- `cup_opening` — the topmost roughly-circular RIM (centroid + radius), VERIFIED as a genuine mouth by a
+  **cavity-depth** ray (a ray from just inside the rim along −normal must travel ≥ 0.3·radius before the cavity
+  floor; a flat face has no cavity → not a mouth).
+- A feature absent from the geometry is simply **not returned** (reported as not-found, never hallucinated).
+
+**Virtual annotation (no physics perturbation — two mechanisms by source kind):**
+- **MESH object (the mug — no URDF):** keep `ObjectSpec.keypoints` (LOCAL frame). The task reads the LIVE world
+  pose with `refine.world_keypoint(local_kp, obj_pos, obj_quat)` = `object_pose ∘ local_keypoint`. NOTHING is
+  added to the sim, so it cannot change physics by construction.
+- **URDF object:** `refine.make_virtual_keypoint_links(keypoints, parent_link)` returns URDF XML the agent
+  appends — per keypoint a **virtual child LINK** (mass 0 + ε-inertia, **NO `<collision>`, NO `<visual>`**) on a
+  **fixed joint** at the keypoint pose, with the link +Z along the keypoint normal. Load with
+  `morphs.URDF(..., links_to_keep=["kp_<name>"])` so Genesis's fixed-link merging (default `merge_fixed_links=
+  True`, for perf) PRESERVES the frame as a queryable link (`entity.get_link("kp_<name>").get_pos()`), with no
+  perf cost on the rest. Zero mass + no geom ⇒ no inertia, no contacts, no topology change.
+
+*The "no perturbation" guarantee — PROVEN:* `scripts/temp/probe_virtual_link_noperturb.py` settles the PartNet
+bottle with and without the virtual link (each in its own process). Result: settled pose **identical**
+(`|Δpos|=0.000 mm, |Δquat|=0.0000000`), **collision-geom count unchanged** (3 vs 3 → same contacts/topology),
+and the virtual frame is queryable live from the sim. For the MESH mug, adding the keypoints leaves the
+stability + penetration gates **unchanged** (`SIM-READY: YES` either way — the keypoints touch no sim object).
+
+## 3. PartNet-Mobility SEMANTIC link naming (verified, never hallucinated)
+`refine.semantic_label_links(urdf, category, renders=None, truth_path=None) -> {raw_link: {semantic, role,
+evidence, confidence, verified}}`. For an articulated URDF whose links are raw indices (`link_0/link_1/…`) it
+assigns CORRECT semantic names from **geometry + joint kinematics** — and **never renames the URDF** (which would
+break mesh/joint references); it emits an annotation MAP the task solver reads.
+
+*Method:* parse links+joints; measure each real link's convex-hull **volume**, **extent**, **centroid**; the
+largest fixed-rooted link = `static_base`, a smaller link on a non-fixed effective joint (walking past PartNet's
+fixed `*_helper` links) = `movable_top`. The role → a category word via `_SEMANTIC_LEXICON`
+(bottle→cap/bottle_body, stapler→top_arm/base, cabinet→door/cabinet_body, …; generic fallback). Handles `<mesh>`
+AND primitive `<box>/<cylinder>/<sphere>` geometry. **VERIFICATION:** if a PartNet `semantics.txt` is given, the
+derived name is family-matched against the ground-truth name (`cap`≈`rotation_lid`, `body`≈`bottle_body`); only
+a PASS sets `verified=True`. Multi-view renders are recorded as inspectable evidence; the decision is driven by
+reproducible measurement, not a guess.
 
 ## How to refine a NEW object (the recipe)
 1. SOURCE it: Objaverse/YCB (rigid) or PartNet-Mobility (articulated). Copy the source into
    `genesis_firefly/assets/objects/<set>/`. Note WHERE it came from.
-2. Copy `registry/demo_mug.py` to `registry/demo_<obj>.py`; set the source path, the category, and the measured
-   keypoints + hollow probe (run a small trimesh probe first — see `demo_mug.py`'s header for the X-Z silhouette
-   + encircled-hole recipe).
-3. Run: `CUDA_VISIBLE_DEVICES=0 ./.venv/bin/python genesis_firefly/registry/demo_<obj>.py`. It prints the
-   RefineReport + the ready-to-paste ObjectSpec line, writes `output/temp/<obj>_refine_verify.png` + a JSON.
-4. Confirm `SIM-READY: YES`, paste the ObjectSpec line into `registry/object_spec.py::REGISTRY`, and append a
-   per-object entry to `.claude/workbooks/object_refiner_workbook.md` + a `docs/roadmap.md` line.
+2. Copy `registry/demo_mug.py` to `registry/demo_<obj>.py`; set the source path + the category. v2 **auto-detects
+   the keypoints** (`detect_kps=True`) and auto-derives the hollow probe from the detected ring — you usually do
+   NOT hand-measure anymore; pass hand values only as a cross-check.
+3. Run: `CUDA_VISIBLE_DEVICES=1 ./.venv/bin/python genesis_firefly/registry/demo_<obj>.py`. It prints the
+   RefineReport + the ready-to-paste ObjectSpec line, writes the COLLIDER multi-view PNGs **next to the asset**
+   (`assets/objects/<set>/<obj>_collider_views/`), the verify render + the keypoint-overlay render to
+   `output/temp/`, and a JSON.
+4. **Inspect the collider views** (hollow stays hollow + solid never fills) and the keypoint overlay (labels land
+   on the real features). Confirm `SIM-READY: YES` and every kept keypoint is `[VERIFIED]`. Paste the ObjectSpec
+   line into `registry/object_spec.py::REGISTRY`; append a per-object entry to the workbook + a `docs/roadmap.md`
+   line. For an articulated URDF, also run the semantic-naming step and bake the verified name map.
 
-## Run the mug demo (the demonstration)
+## Run the demos (the demonstrations)
+**Mug (rigid hollow + collider views + verified keypoints):**
 ```
-CUDA_VISIBLE_DEVICES=0 ./.venv/bin/python genesis_firefly/registry/demo_mug.py
+CUDA_VISIBLE_DEVICES=1 ./.venv/bin/python genesis_firefly/registry/demo_mug.py
 ```
-Prereqs: the repo `./.venv` (trimesh, coacd, genesis 1.1.2, Nyx) from the repo root; a GPU. The YCB
-`mug.usd` is already under `genesis_firefly/assets/objects/ycb/`. Output: the RefineReport, the ObjectSpec line,
-`genesis_firefly/output/temp/mug_refine_verify.png` (the mug resting stable, the cup mouth open, a branch
-threaded through the open handle ring), and `mug_refine_report.json`.
+Prereqs: the repo `./.venv` (trimesh, coacd, genesis 1.1.2, Nyx) from the repo root; a GPU. The YCB `mug.usd` is
+already under `genesis_firefly/assets/objects/ycb/`. Output: the RefineReport (incl. detected+verified keypoints
++ the 6 collider-view paths), the ObjectSpec line, `assets/objects/ycb/mug_collider_views/*.png`,
+`output/temp/mug_refine_verify.png` (the mug stable, cup mouth open, a branch threaded through the open ring),
+`output/temp/mug_keypoints_verify.png` (the labelled ring + cup-mouth frames drawn on the mug), and a JSON.
+
+**PartNet-Mobility semantic naming (articulated):**
+```
+CUDA_VISIBLE_DEVICES=1 ./.venv/bin/python genesis_firefly/registry/demo_partnet_naming.py
+```
+Names the LIVE PartNet-Mobility **3763 bottle** (model_cat "Bottle"; copied to
+`assets/objects/partnet_mobility/3763_bottle/`): `link_0 → cap`, `link_1 → bottle_body`, each VERIFIED against
+its `semantics.txt`, plus inspection renders to `…/3763_bottle/bottle_views/`. Includes a self-contained
+**synthetic-stapler unit test** (`link_0 → base`, `link_1 → top_arm`, verified) so the function is tested even
+without a live asset. The virtual-link no-perturbation proof is `scripts/temp/probe_virtual_link_noperturb.py`.
 
 ## Sim-readiness GATES (what "done" means) — never ship a faked/unverified asset
 `SIM-READY: YES` requires a REAL run reporting: `penetration_at_rest` PASS (abnormal 0) AND `init_stability`
 PASS (drift within tolerance, no explosion) AND (hollow objects) `hollow_feature_open` PASS (probe overlap ~0).
-If a piece can't work (no usable source, the feature fills, it won't settle), STOP and report — do not fabricate.
+**v2 additionally:** every baked keypoint must be `[VERIFIED]` (handle_ring by the in-sim hollow probe through
+the DETECTED center; cup_opening by the cavity-depth test) and every semantic link name must be `verified` (vs
+PartNet ground truth) — an unverified label is reported as `uncertain` and NOT baked. The collider multi-view
+renders are inspected as the final visual collision check. If a piece can't work (no usable source, the feature
+fills, it won't settle, a name can't be verified), STOP and report — do not fabricate.
 
 ## Reuse + boundaries
 - REUSES `skills/penetration.py` as the collision verifier (never reimplemented), `world/firefly_scene.py`'s

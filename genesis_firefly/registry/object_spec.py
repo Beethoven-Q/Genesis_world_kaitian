@@ -130,8 +130,13 @@ REGISTRY: dict[str, ObjectSpec] = {
         local_center=(0.0, 0.0, 0.0), friction=(1.0, 0.9),
         elongated=True, local_long_axis=(-0.4030, 0.0219, -0.9149),
         color=(0.90, 0.90, 0.93), grasp_dz=0.0, x_range=(0.34, 0.44), place_xy_tol_cm=8.0,
+        # keypoints DETECTED by refine.detect_keypoints + sim-VERIFIED (object-refiner v2, 2026-06-20): the
+        # handle_ring via an encircled-through-hole search (in-sim hollow probe 0.00mm overlap = open ring) and
+        # the cup_opening via a topmost-rim + cavity-depth test (76mm cavity below the rim = a real mouth). Both
+        # agree with the earlier hand-measured values to <1.5mm. The task reads the LIVE world frame via
+        # refine.world_keypoint(local_kp, mug.get_pos(), mug.get_quat()) — a massless, physics-inert annotation.
         keypoints={
-            "handle_ring": dict(center=(0.0395, 0.0, 0.0), normal=(0.0, 1.0, 0.0), radius=0.0105),
-            "cup_opening": dict(center=(-0.012, 0.0, 0.04), normal=(0.0, 0.0, 1.0), radius=0.045),
+            "handle_ring": dict(center=(0.0409, -0.0016, -0.0001), normal=(0.0, 1.0, 0.0), radius=0.0091),
+            "cup_opening": dict(center=(-0.0111, 0.0006, 0.0394), normal=(0.0, 0.0, 1.0), radius=0.0437),
         }),
 }
