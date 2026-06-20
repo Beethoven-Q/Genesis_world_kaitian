@@ -69,17 +69,34 @@ This is the mechanism by which the DR agent "gets more professional and fluent o
 
 ---
 
-## Object-refiner  `.claude/agents/object-refiner.md`  [PLANNED]
-Makes an object *physically and visually real* before it enters the registry.
+## Object-refiner  `.claude/agents/object-refiner.md`  [BUILT — MVP]
+Makes an object *physically real and collision-correct* (the owner's #1 priority) before it enters the registry.
+**MVP built 2026-06-19:** the agent definition, the reusable refine HARNESS (`registry/refine.py`), the mug demo
+driver (`registry/demo_mug.py`), and the workbook all exist, and the augment->infer->collision->verify pipeline
+was demonstrated END-TO-END on the YCB mug (a hollow handle ring + a hollow cup mouth) -> **SIM-READY: YES**
+(penetration abnormal 0, init-stability D_pos 0.03 mm / D_ori 0.0012 rad, hollow-probe overlap 0.00 mm), with
+the verification render + the `ObjectSpec` + the `handle_ring`/`cup_opening` keypoints added to the registry.
+Full spec: [object_refiner.md](object_refiner.md). The articulated (PartNet-Mobility joint-oscillation) path
+and a Nyx multi-view augment render are designed but **deferred to future** (the MVP did the rigid-hollow case).
 
-- **Role.** (a) Refine the object **URDF** (geometry, inertials, materials) for realism; (b) **label trackable
-  keypoints** into `ObjectSpec.keypoints` — e.g. the **mug handle ring's center + normal**, a cap's screw axis,
-  a drawer handle, a peg tip — the frames skills like the virtual-EE control; (c) run a **collision audit**:
-  hollow parts stay **hollow** (convex-**DECOMPOSITION**, never a single filling hull) and solid parts **never
-  interpenetrate** under firm grip.
+- **Role.** (a) **SOURCE** the object (Objaverse/YCB rigid; PartNet-Mobility articulated — note WHERE); (b) run
+  the refine harness — **AUGMENT** (trimesh mesh analysis: watertight/volume/area/extents/CoM/scale/long-axis/
+  hollowness) -> **INFER** physics (mass = solid_volume x category density, friction, restitution) -> **COLLISION**
+  (a GOOD collider = convex-**DECOMPOSITION** so hollow stays hollow, never a single filling hull, + a Nyx-safe
+  clean OBJ) -> **VERIFY** sim-readiness; (c) **label trackable keypoints** into `ObjectSpec.keypoints` (the mug
+  handle-ring center+normal, a cup opening, a cap axis, a peg tip — the virtual-EE frames); (d) emit the
+  `ObjectSpec`.
+- **The verify gate (REUSES our tools).** (i) `skills/penetration.py` -> abnormal ~= 0 at rest; (ii) the paper's
+  **initialization-stability test** = settle with ZERO actions ~1 s then measure root drift (`D_pos <= 3 mm`,
+  `D_ori <= 0.02 rad`, no explosion); (iii) for a hollow object, a thin probe threaded through the feature must
+  read ~0 overlap (a branch can thread the ring). Real run + render or it didn't happen.
 - **Inputs.** A raw object asset (URDF/USD/mesh) + the task's needs. **Outputs.** A realistic,
-  keypoint-annotated, collision-correct object + its `ObjectSpec`.
-- **Boundaries.** Edits assets/registry for its object only; does not touch the stage/robot/DR engine.
+  keypoint-annotated, **sim-ready-VERIFIED** object + its `ObjectSpec` + a verification render.
+- **Boundaries.** Edits assets/registry + a `demo_<obj>.py` driver for ITS object only; REUSES
+  `skills/penetration.py` (never reimplements it); never touches the locked stage/robot/IK/gripper/DR engine/
+  executor/collectors. Verifies with real runs; never ships a faked/unverified asset.
+- **Workbook** `.claude/workbooks/object_refiner_workbook.md` [BUILT — MVP]: category density priors + a
+  per-object log (the mug entry, the geometry-probe recipe that found the handle hole, hard corners).
 
 ## Disturbance + failure-recovery  — a HARNESS + god-mode recovery control  [BUILT]
 Generates **failure-and-recovery** data so the trained policy is robust. **This is NOT an LLM subagent.**

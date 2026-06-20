@@ -12,7 +12,7 @@ Sources: "usd" (asset under assets/objects/<usd_subpath>), "cuboid" (procedural 
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 
@@ -43,6 +43,12 @@ class ObjectSpec:
     rest_offset: float = 0.0        # hard contact standoff (thin pen -> 0.004 to stop claw ON the surface)
     x_range: tuple = (0.34, 0.42)   # DR reachable x range (y mirrored per arm)
     place_xy_tol_cm: float = 8.0    # physical-success XY tolerance from the bowl centre
+
+    # Trackable FEATURE frames in the rigid-body LOCAL frame, populated by the object-refiner agent
+    # (registry/refine.py). Each entry: name -> {"center": (x,y,z), "normal": (nx,ny,nz), ["radius": r]} — the
+    # frames a skill like the virtual-EE controls (e.g. a mug handle-ring center+normal -> thread onto a branch;
+    # a cup opening; a cap axis; a peg tip). Empty for objects without a labelled feature.
+    keypoints: dict = field(default_factory=dict)
 
     # --- derived geometry helpers (no I/O) ---
     def scaled_extents(self) -> np.ndarray:
@@ -110,4 +116,22 @@ REGISTRY: dict[str, ObjectSpec] = {
         name="book", language_name="book", source="cuboid", mass=0.300,
         extents=(0.18, 0.13, 0.03), local_center=(0.0, 0.0, 0.0), elongated=False,
         color=(0.45, 0.10, 0.12), friction=(1.2, 1.0), x_range=(0.34, 0.44), place_xy_tol_cm=8.0),
+    # mug: a HOLLOW ceramic mug (YCB), REFINED + sim-ready-VERIFIED by the object-refiner harness
+    # (registry/refine.py + demo_mug.py, 2026-06-19). The handle ring + cup mouth STAY HOLLOW via convex
+    # DECOMPOSITION (34 hulls) — a branch threads the ring with 0.00mm overlap (verified). Mass from
+    # solid_volume(237cm^3) x ceramic density(2400) ~= 0.57kg (a thick ceramic mug; on the heavy side because
+    # the voxel-fill counts the whole wall+interior volume). Nyx renders the clean mug_clean.obj (USD segfaults
+    # Nyx). long_axis is the PCA axis (handle-out X tilted by the cup body) — kept for the record; for a future
+    # mug-hang the CONTROLLED frame is the handle_ring keypoint, not this grasp axis. Geometry MEASURED.
+    "mug": ObjectSpec(
+        name="mug", language_name="mug", source="usd", usd_subpath="ycb/mug.usd",
+        mesh_subpath="ycb/mug_clean.obj", dist_color=(0.85, 0.85, 0.88),
+        mass=0.569, extents=(0.1170, 0.0931, 0.0814),
+        local_center=(0.0, 0.0, 0.0), friction=(1.0, 0.9),
+        elongated=True, local_long_axis=(-0.4030, 0.0219, -0.9149),
+        color=(0.90, 0.90, 0.93), grasp_dz=0.0, x_range=(0.34, 0.44), place_xy_tol_cm=8.0,
+        keypoints={
+            "handle_ring": dict(center=(0.0395, 0.0, 0.0), normal=(0.0, 1.0, 0.0), radius=0.0105),
+            "cup_opening": dict(center=(-0.012, 0.0, 0.04), normal=(0.0, 0.0, 1.0), radius=0.045),
+        }),
 }

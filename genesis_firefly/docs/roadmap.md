@@ -249,3 +249,37 @@ phase lands. Requirements live in [project_overview.md](project_overview.md) (bl
   config (scopes.py/object_dr.py/sampler.py/apply.py/plan.py) replacing the hand-written `sample_phys_dr` is a
   large refactor; the MVP advises edits to the existing ranges instead. See `agents.md` (DR strategist now
   [BUILT — MVP]) + the workbook.
+- **2026-06-19 — OBJECT-REFINER agent + harness (MVP).** *Goal* (owner): the harness + agent that turns a RAW
+  object into a SIM-READY asset with a CORRECT collision model (the #1 priority), reusing our verifiers,
+  grounded in the ASSET2SIM paper. *Built:* **(1)** `genesis_firefly/registry/refine.py` — the reusable refine
+  HARNESS: **AUGMENT** (`analyze_mesh`: trimesh is_watertight / voxel-fill solid volume / area / extents / CoM /
+  PCA long-axis / hollowness / suggested-scale — pure, no engine) -> **INFER** (`infer_physics`: mass =
+  solid_volume x a per-category density from `CATEGORY_PRIORS` (ceramic/glass/wood/plastic/metal/rubber/fruit) +
+  friction + restitution) -> **COLLISION** (`extract_visual_obj`: the GOOD collider = convex DECOMPOSITION via
+  coacd `threshold=0.04` — the SAME bowl recipe so hollow stays hollow, NEVER a single filling hull — + a
+  Nyx-safe clean OBJ, since Nyx segfaults on the textured USD) -> **VERIFY** (`verify_in_sim`: reuses
+  `skills/penetration.py` for abnormal ~= 0 at rest + the paper's **initialization-stability test** = settle
+  with ZERO actions ~1.2 s then measure root drift `D_pos<=3mm`/`D_ori<=0.02rad`/no-explosion + a thin-cylinder
+  **hollow probe** threaded through a declared feature). Returns a structured `RefineReport`. The
+  engine-touching stages run in FRESH subprocesses (one `gs.Scene`/process — a 2nd build segfaults). **(2)**
+  `.claude/agents/object-refiner.md` — the Claude Code subagent (use CLAUDE) implementing the contract: SOURCE
+  (Objaverse/YCB rigid; PartNet-Mobility articulated — note WHERE) -> run the harness -> VERIFY -> label
+  KEYPOINTS -> emit the `ObjectSpec`; edits assets/registry for its object only, REUSES the penetration gate,
+  never touches the locked stage/robot/IK/DR/collectors. **(3)** `ObjectSpec.keypoints` field added (LOCAL-frame
+  `name -> {center, normal, [radius]}` — the virtual-EE frames). **(4)** the workbook
+  `.claude/workbooks/object_refiner_workbook.md` (category densities + a per-object log). *Demonstrated
+  END-TO-END on the YCB mug* (`registry/demo_mug.py`; a hollow handle ring + a hollow cup mouth):
+  augment extents (0.117,0.093,0.081) m, solid 237 cm^3, hollowness 0.55 -> infer ceramic 2400 kg/m^3 -> mass
+  0.569 kg -> collision **34 convex hulls** (ring + cavity stay OPEN) + `ycb/mug_clean.obj` -> **VERIFY all
+  PASS**: penetration abnormal **0/1** (max 0.04 mm), init-stability **D_pos 0.03 mm / D_ori 0.0012 rad** no
+  explosion, hollow-probe object<->branch overlap **0.00 mm** (a 4 mm branch through the ~10.5 mm handle hole) ->
+  **SIM-READY: YES**. The `mug` `ObjectSpec` + `handle_ring`/`cup_opening` keypoints were added to the registry;
+  a verification render (mug resting stable, cup mouth open, a brown branch threaded through the OPEN handle
+  ring) saved to `output/temp/mug_refine_verify.png`. *Geometry-probe lesson:* the FIRST handle-hole guess had
+  the X sign wrong (a vert-count shell mis-attributed the cup wall as the handle, probe overlap 6.2 mm); fixing
+  it via an X-Z silhouette + an **encircled-hole search** (require >=7/8 angular sectors occupied — a
+  corner-of-mesh max-clearance point is a false positive) put the keypoint on the TRUE open hole -> 0.00 mm. Mass
+  on the heavy side (the voxel-fill counts the whole wall+interior volume; a real EMPTY mug ~0.35 kg) — noted in
+  the workbook. *Deferred (future):* the articulated PartNet-Mobility joint-oscillation gate + a Nyx multi-view
+  augment render (the MVP did the rigid-hollow case). See `object_refiner.md` + `agents.md`
+  (object-refiner now [BUILT — MVP]).
