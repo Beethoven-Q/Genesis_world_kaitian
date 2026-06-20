@@ -367,3 +367,28 @@ agent-native; subagents for context; rigorous, no hallucination.
   top-down grasp — the prior "needs a dex hand" conclusion was likely the broken-foundation symptom; the owner is
   confident these are easy when the foundation is correct (RoboLab found apple the easiest). Re-evaluate from
   scratch before adding any grasp machinery.
+
+- **2026-06-20 — ARM OVER-STRETCH at pre-grasp + lift: NOT the IK solver, it was the top-down-lift wrist
+  saturation (fixed RoboLab-faithfully).** *Symptom (owner, with screenshots):* the arm reaches the object
+  elbow-high and lifts toward near-vertical, the wrist jitters/locks — unnatural vs RoboLab. *Investigation
+  (multi-agent workflow + a decisive SODA-vs-Genesis experiment):* (1) **the IK solver is INNOCENT** — SODA's
+  analytic IK returns joints IDENTICAL to our Genesis-native DLS (to 3 decimals), same saturation; the gr100 IK
+  URDF and the dual sim URDF are byte-identical; the `robots/ik.py` "~1cm residual" reason to avoid SODA IK is
+  FALSIFIED (residual 0.00mm). So we KEEP the batched Genesis IK — parallelism safe, no SODA port, no repo
+  change. (2) **Real cause = orientation/geometry:** a TOP-DOWN gripper saturates wrist1 (joint_4) above EEz~0.38
+  for this low workspace (base z=0.25, table at base level); the grasp (EEz~0.29) is comfortable (j4~1.0) but the
+  straight `LIFT=0.18` (EEz~0.47) pins j4 at its +1.57 limit and collapses the elbow (joint_3) to ~0.4. Grasp
+  YAW is irrelevant (all yaws saturate at the lift); only a forward/relax TILT recovers the margin. RoboLab stays
+  natural via `reachable_grasp_quat`'s relax-to-minimal-tilt (0,8,16,24,32deg) + a gentle lift_h(=0.07) — our
+  port had that loop STUBBED to pure top-down (0deg) + LIFT=0.18. *Fix (tasks/pickplace.py only, IK untouched):*
+  `grasp_quat_at`/`cquat` take a per-env `tilt_deg`; `select_grasp_tilt`/`select_place_tilt` prefer top-down and
+  relax to the smallest tilt keeping `|wrist j4|<=1.40` AND `elbow j3>=1.05` through the pre-grasp+lift+carry
+  (evaluated on the execution-faithful warm-start chain via the batched `solve()`); `LIFT 0.18->0.10`,
+  `PAPP 0.08->0.06`. *Verified (cube DISTURB=0, seeds 7+23, independently re-measured):* wrist |j4|max
+  **1.570->1.367** (margin 0.20), elbow j3min **0.344->1.216** (bent); 8/8 grasp+place, 0 abnormal pen (2.7mm),
+  max|dq|=0.020 (smooth); pre-grasp + lift frames visibly compact/bent (`output/temp/tiltfix_final/FINAL_*.png`).
+  *Process lesson (owner, emphatic):* the original Genesis-IK-vs-SODA-IK switch was an architectural trade-off
+  (grasp accuracy vs natural motion) made silently in a code comment — SURFACE trade-offs like that to the owner,
+  don't bury them. *Known follow-up:* DISTURB>0 recovery re-grasps reuse the planned tilt (2/8 briefly touch the
+  wrist limit at the shoved pose) — opt-in hard-recovery path, re-select the tilt at the shoved pose to close it.
+  Commit `b42bb96`. Next: re-collect 200 clean full-DR cube (parallel) + redo disturbance, then apple/banana/pen/tennis.
