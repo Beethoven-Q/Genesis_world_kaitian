@@ -283,3 +283,42 @@ phase lands. Requirements live in [project_overview.md](project_overview.md) (bl
   the workbook. *Deferred (future):* the articulated PartNet-Mobility joint-oscillation gate + a Nyx multi-view
   augment render (the MVP did the rigid-hollow case). See `object_refiner.md` + `agents.md`
   (object-refiner now [BUILT — MVP]).
+
+## Planned refinements + forward plan (2026-06-20, owner directives)
+**A. Disturbance v2 — smoother + collaborative timing (failure-recover AND moving-object "chase" data).**
+- *Smoothness:* on a failed grasp the arm must rise only a SMALL amount to clear the view + retry — NOT lift high
+  to near-singularity (the current ~jerk). Detect the miss right at the gripper-close-on-nothing. All gentle.
+- *Collaborative timing:* fire the gentle shove at a RANDOM time during the APPROACH, then inform the task solver
+  after a reasonable sense-DELAY. If the solver is informed BEFORE the gripper closes → it GIVES UP the current
+  grasp, rises a little, and SMOOTHLY PIVOTS to the cube's new pose (gripper gently "chases" the moving object) →
+  *chase-a-moving-object* data. If informed AFTER close → too late, grasp fails → rise-a-bit + retry new pose →
+  *failure→recover→replan* data. One mechanism, both data modes.
+- *Future:* a rotating Lazy-Susan with the target on it → the solver reads the real-time pose + chases it →
+  moving-object grasp data.
+**B. Object-refiner v2 — multi-view collider check + verified keypoint/part labeling (virtual, physics-less).**
+- *Multi-perspective COLLIDER render* (the final collision check): after collision is correct, render the
+  COLLIDER (vis_mode=collision) from several views for the AGENT to inspect + confirm (hollow stays hollow, solid
+  never penetrates) — like the arm/camera collider render. SAVE these images WITH the asset so the owner can check.
+- *Keypoint/part labeling:* the refiner DETECTS + labels meaningful keypoints/parts from geometry (mug handle-ring
+  center+normal, cup-top opening; towel 4 corners; etc.) so the task solver never has to hunt for them (the
+  RoboLab time-sink — once mistook the cup opening for the ring). Bake each as a VIRTUAL annotation: a massless,
+  COLLISION-LESS, INVISIBLE labeled frame/point (a virtual link for URDFs) the task solver reads from sim info.
+  MUST NOT perturb the object's physics/topology. For PartNet-Mobility: give raw link/joint indices (link1/2/3)
+  correct SEMANTIC names — VERIFIED by geometry/render, NEVER hallucinated (a wrong name misleads the solver).
+**C. Forward plan (after A+B land clean):** use the agentic system to SOLVE other-object pick-place (apple/
+banana/pen/tennis-ball; round-object grasp = the caging challenge) → after owner exam, collect their full-DR data
+→ then the **virtual-EE skill + mug-hang**. **Dexterous hand:** a NEW git BRANCH (it substitutes the gripper),
+clean + safe; goal = pick-place with dex-hand+arm, then throw-and-catch a tennis ball in a parabola. Stay
+agent-native; subagents for context; rigorous, no hallucination.
+- **2026-06-20 — Refinements A+B DONE & verified.** (A) Disturbance v2 (`a398a43`): random approach-timing shove
+  + sense-delay → before-close **smooth CHASE** to the moved cube (moving-object data) vs after-close **gentle
+  RETRY** (recovery data); jerk fixed (RETRY_RISE 0.20→0.10m + rise→reorient→descend decomposition → retry
+  max|dq| 0.198→0.068, global all-phase ≤0.098). Empty-close claw-claw contact allow-listed in the penetration
+  gate (same-gripper pair only; all else still counts). HDF5 attrs disturbed/disturb_phase/disturb_outcome/
+  recovery_attempts. (B) Object-refiner v2 (`6f2e59b`): multi-view COLLIDER renders saved with each asset (read
+  the hulls directly; mug ring open + mouth open + body solid); keypoints/parts as VERIFIED virtual massless/
+  collision-less/invisible labels (mug ring+opening, proven 0 physics perturbation); PartNet semantic naming
+  verified live (bottle link_0→cap, link_1→bottle_body vs semantics.txt) + a synthetic-stapler unit test.
+- **NEXT (forward plan §C):** generalize the pick-place task to a CONFIGURABLE TARGET object → solve banana/pen
+  (elongated, the orientation-aware grasp handles them) + ATTEMPT apple/tennis-ball (round = the sphere-ejection
+  caging challenge); then full-DR collect (owner exam); then virtual-EE + mug-hang; then the dex-hand BRANCH.
