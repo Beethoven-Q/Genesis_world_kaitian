@@ -90,15 +90,25 @@ class BatchExecutor:
             ent.control_dofs_position(full); self.scene.step()
             return full
 
+        import os as _os
+        _dbg = _os.environ.get("DQ_DEBUG")
         aq = None
         prev_aq = None
         self.max_dq = np.zeros(self.N)                        # diagnostic: worst per-step active-arm joint jump
+        self.max_dq_step = np.zeros(self.N, int)             # diagnostic: the step + label at that worst jump
+        self.max_dq_label = [""] * self.N
         full = home_full
         for t in range(T):
             if aq is None or t % self.ik_every == 0:          # re-solve arm IK every ik_every steps (ZOH between)
                 aq = solve(pos[t], quat[t])
                 if prev_aq is not None:                       # a branch flip = a >1 rad single-step spike
-                    self.max_dq = np.maximum(self.max_dq, np.abs(aq - prev_aq).max(axis=1))
+                    step_dq = np.abs(aq - prev_aq).max(axis=1)
+                    upd = step_dq > self.max_dq
+                    self.max_dq = np.maximum(self.max_dq, step_dq)
+                    if _dbg:
+                        for e in np.where(upd)[0]:
+                            self.max_dq_step[e] = t
+                            self.max_dq_label[e] = f"{labels[max(t-1,0)][e]}->{labels[t][e]}"
                 prev_aq = aq
             full = apply(aq, grip[t])
             if during_step is not None:                       # every-step hook (disturbance injection)
