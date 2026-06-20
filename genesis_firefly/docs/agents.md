@@ -62,17 +62,33 @@ Makes an object *physically and visually real* before it enters the registry.
   keypoint-annotated, collision-correct object + its `ObjectSpec`.
 - **Boundaries.** Edits assets/registry for its object only; does not touch the stage/robot/DR engine.
 
-## Disturbance-designer  `.claude/agents/disturbance-designer.md`  [PLANNED]
-Generates **failure-and-recovery** data so the trained policy is robust.
+## Disturbance + failure-recovery  — a HARNESS + god-mode recovery control  [BUILT]
+Generates **failure-and-recovery** data so the trained policy is robust. **This is NOT an LLM subagent.**
+It is a deterministic injection HARNESS (`skills/disturbance.py`) plus a god-mode recovery CONTROL staged
+into the task (`tasks/pickplace.py`) — the same first-principles pattern as the penetration gate and the
+50/50 distractors: a privileged, reproducible sim mechanism the main agent *calls*, not a planner it delegates
+to. Full spec: [disturbance_recovery.md](disturbance_recovery.md).
 
-- **Role.** Inject controlled disturbances during the main agent's execution: nudge the object as the arm
-  reaches to grasp (→ did the grasp succeed? regrasp if missed), knock the object over, shift the target
-  mid-transport. The main agent must *detect* the failure from privileged state and *recover* — and the demo
-  records the recovery.
-- **Mechanism.** A `DisturbanceSpec` (what / when / how strong) injected at a scheduled step inside
-  `skills/executor.py::BatchExecutor.run`. Tunable so most trials are clean and a minority are perturbed.
-- **Why.** Clean-only data yields brittle policies; failure-recovery modes teach the policy to handle the
-  imperfect real world.
+- **Role.** With a per-env PROBABILITY (default ~0.34, mirroring the 50/50 distractor `has_dist` pattern),
+  inject a GENTLE random in-plane shove on the TARGET cube DURING the grasp approach → the planned grasp
+  MISSES. The god-mode solver DETECTS the miss from privileged sim signals and RECOVERS by replanning.
+- **Mechanism.** `DisturbanceSpec.sample(...)` draws the disturbed envs + their (vx,vy) impulse from the stage
+  rng; `inject()` adds a small horizontal velocity on the cube's free-joint x/y dofs for the disturbed envs
+  only (BATCHED, `set_dofs_velocity(..., envs_idx=...)`), fired once via a `during_step` hook added to
+  `BatchExecutor.run` when the active arm enters the `at`/`close` window. The cube slides ~2–5 cm under
+  friction (a physical shove, no teleport) so the committed grasp closes on nothing.
+- **Detection (privileged).** `grasp_failed = (cube did NOT rise > 3 cm) OR (driven gripper near the empty-close
+  stop AND cube far from the EE)` — read straight from the cube pose + gripper joint position.
+- **Recovery (batched, ≤2 attempts).** Failed envs get extra batched phases (rise to a safe height, REOPEN,
+  RE-LOCATE the cube from the sim, re-plan + re-grasp via the LOCKED grasp/waypoint builders); successful envs
+  HOLD their grasp. Then the place phase runs for all. The recorded demo therefore contains failed-grasp +
+  recovery + success — that *is* the training signal. Motion stays on the one smooth path (BatchExecutor +
+  densify); no new motion engine.
+- **HDF5 attrs.** `disturbed` (bool), `recovered` (bool: disturbed AND placed), `recovery_attempts` (int).
+- **Why.** Clean-only data yields brittle policies; failure-recovery modes teach the policy to detect a failed
+  grasp and replan, handling the imperfect real world.
+- **Future.** Same harness generalises to other cases (cup bumped over, target shifted mid-transport) by
+  choosing a different target/trigger-phase/impulse — see disturbance_recovery.md "Future cases".
 
 ## More to come  [PLANNED]
 The framework is extensible: a task-authoring agent (masters the §1 loop), a viewpoint/camera agent, a

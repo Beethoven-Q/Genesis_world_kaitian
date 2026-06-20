@@ -61,13 +61,16 @@ class BatchExecutor:
                 pos[t, e], quat[t, e], grip[t, e], labels[t][e] = p, q, g, l
         return pos, quat, grip, labels, T
 
-    def run(self, waypoints, solve, home_full, *, on_step=None, settle_steps=40):
+    def run(self, waypoints, solve, home_full, *, on_step=None, settle_steps=40, during_step=None):
         """Execute the smooth batch.
 
         ``solve(pos[N,3], quat[N,4]) -> active_arm_joints[N,6]`` IK-solves BOTH arms and selects the
         active one per env. ``home_full`` is the [N, n_dofs] command the UNUSED arm holds. ``on_step
         (t, full_cmd[N,n_dofs], labels_t[N])`` is called every ``rec_every`` steps (and once at the
-        end) for the task to record state + render. Returns T (number of control steps executed)."""
+        end) for the task to record state + render. ``during_step(t, labels_t[N])`` (optional) is called
+        EVERY control step right after the sim step — used by the disturbance HARNESS to fire its gentle
+        impulse exactly when the active arm enters the grasp-approach window (it does NOT change motion;
+        it only lets the task inject a privileged sim event at the right moment). Returns T."""
         from robots.firefly_dual import GR100_MIMIC
 
         pos, quat, grip, labels, T = self.plan(waypoints)
@@ -98,6 +101,8 @@ class BatchExecutor:
                     self.max_dq = np.maximum(self.max_dq, np.abs(aq - prev_aq).max(axis=1))
                 prev_aq = aq
             full = apply(aq, grip[t])
+            if during_step is not None:                       # every-step hook (disturbance injection)
+                during_step(t, labels[t])
             if on_step is not None and (t % self.rec_every == 0):
                 on_step(t, full, labels[t])
         for _ in range(settle_steps):                         # let the release settle

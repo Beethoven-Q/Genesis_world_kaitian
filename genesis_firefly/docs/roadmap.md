@@ -209,3 +209,14 @@ phase lands. Requirements live in [project_overview.md](project_overview.md) (bl
   `pi05_hexarm_bowl_lora` → `pi05_genesis_cube_lora` (set LeRobot `repo_id="genesis_cube_fulldr_v2"`; the 14-D
   HexArm transforms + cam names are unchanged) → `compute_norm_stats` → fine-tune pi0.5. Full how-to:
   `lerobot_export.md`.
+- **2026-06-19 — Disturbance → failure-recovery (a HARNESS, not an LLM subagent).** Per-trial probability (~0.34,
+  `DISTURB=0` to disable) gently shoves the target cube in-plane DURING the grasp (`skills/disturbance.py`,
+  batched `set_dofs_velocity` on the cube free-joint x/y, calibrated to ~3-5cm miss, latched once) so the grasp
+  misses; the god-mode solver DETECTS it (cube rose <3cm OR empty-close + cube far) and RECOVERS by staged
+  replanning (rise→reopen→re-locate→re-grasp, ≤2 attempts, batched; clean envs hold) before place. The demo
+  records failed-grasp+recovery+success = the training signal. Verified: DISTURB=0 reproduces parity (16/16,
+  pen 0); DISTURB=0.34 detection EXACT (0 false-flags on 21 clean grasps), every detected failure recovered,
+  ~75-86% disturbed envs recover+place, pen 0, motion smooth (max|dq|~0.10). Added a keyword-only `during_step`
+  hook to BatchExecutor (additive). HDF5 attrs `disturbed/recovered/recovery_attempts`. Note: the staged refactor
+  raised the base no-disturbance max|dq| 0.03→0.098 (still smooth) — a minor phase-boundary-continuity polish for
+  later. Full spec: `disturbance_recovery.md`.
