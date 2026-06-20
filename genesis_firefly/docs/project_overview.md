@@ -50,6 +50,13 @@ simulator with **RTX-grade Nyx** photoreal rendering, then generalizes it into t
   close squirts it out); the fix is a DEEPER per-object grasp so the object sits in the claws' CRADLE (~Z_ee
   −2 cm) where the firm close CAGES it (verified: apple held + lifted, penetration ~2 mm). Fix the depth/cage so
   the FIRM grasp holds — do not go loose.
+- **EACH TRIAL IS FULLY INDEPENDENT — NO CROSS-ENV WAITING (HARD RULE, owner 2026-06-20).** An env must NEVER
+  idle/hold waiting for other envs to finish (not in sim, not in data). Each env runs its OWN continuous
+  trajectory pick→place→home (or pick→[recovery]→place→home) to completion. Do NOT use a STAGED global barrier
+  (e.g. "all envs finish the pick phase, then all place") — that makes early finishers hold the lifted object in
+  the air = forbidden idle. Build each env's FULL trajectory and run it in ONE pass (tail-padded only); for the
+  disturbance case, the chase-vs-fail outcome is fixed at build time (the fire-band), so each env's full path is
+  known up front — no runtime barrier needed. This is NOT a record/trim issue; the WAIT LOGIC itself must not exist.
 - **Maintain `docs/roadmap.md`** — a living problem→change→why→result log. Append a dated entry whenever you fix
   a real problem, change a contract, or make a non-obvious decision. This is how we trace back what we did.
 - **2×2 four-view preview tile** for every collection (see §7). **Storage:** smoke → `output/`; full collections
