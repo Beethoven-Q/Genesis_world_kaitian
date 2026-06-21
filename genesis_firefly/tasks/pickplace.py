@@ -39,7 +39,12 @@ from skills.grasp import _R_from_wxyz, _wxyz_from_R  # noqa: E402
 import skills.grasp as grasp  # noqa: E402
 from skills.executor import BatchExecutor  # the ONE smooth motion path (densify + batch IK)  # noqa: E402
 from skills.penetration import PenetrationTracker, ABNORMAL_THRESH_M  # the #1 collision gate  # noqa: E402
-from skills.disturbance import DisturbanceSpec  # gentle target-shove harness -> failure-recovery data  # noqa: E402
+# DISTURBANCE (modularity 3/3): the target-shove HARNESS + the DISTURBED-TRAJECTORY ASSEMBLY (the read-based
+# chase / after-close recovery + the god-mode grasp-outcome check + fire-step planning) both live in
+# skills/disturbance.py now; collect() builds a small DisturbExec context + calls the assembly. The CLEAN
+# (DISTURB=0) pick_wps+place_tail path stays here.
+import skills.disturbance as disturbance  # noqa: E402
+from skills.disturbance import DisturbanceSpec, DisturbExec  # noqa: E402
 from registry.object_spec import REGISTRY  # noqa: E402
 import world.object_factory as obj_factory  # the ONE shared spec->sim-entity builder (collision+visual+texture); aliased NOT ``objf`` (a local var below)  # noqa: E402
 import imageio.v3 as iio  # noqa: E402
@@ -604,9 +609,9 @@ def collect(N, seed, data_dir, out_dir, target=None):
                               tilt_steps=_GRASP_TILT_STEPS_DEG, WRIST_LIMIT=WRIST_LIMIT, WRIST_MARGIN=WRIST_MARGIN,
                               ELBOW_MIN=ELBOW_MIN)
 
-    # NOTE: the per-env SPARSE pick waypoints (pre->at->at->close->lift) are built inline below by the staged
-    # phases A1 (approach, open) + A2 (close/lift or chase) and by ``approach_close_lift_wps`` (chase + retry),
-    # all from the SAME locked grasp builders -- one motion path, no extra engine.
+    # NOTE: the per-env SPARSE pick waypoints (pre->at->close->lift) are built by ``pick_wps`` / ``pick_wps_nodwell``
+    # / ``place_tail`` below; the DISTURBED re-grasp/recovery streams are built in skills/disturbance.py from these
+    # same locked builders -- one motion path, no extra engine.
 
     # ---- execute the smooth batch + RECORD (states/actions + render 4 Nyx cams every REC_EVERY) ----
     acts, jpos, jvel, eepos, eequat, cubez = [], [], [], [], [], []
@@ -668,22 +673,23 @@ def collect(N, seed, data_dir, out_dir, target=None):
             dist_trace.append(np.stack([np_(e.get_pos())[:, :2] for e in dist_ents], 0).copy())
 
     # ============================================================================================ #
-    # DISTURBANCE HARNESS v2 — FAILURE-RECOVERY DATA (opt-in augmentation, per-env, NO barrier)
+    # DISTURBANCE — FAILURE-RECOVERY DATA (opt-in; god-mode read-based; see skills/disturbance.py + the doc)
     # ============================================================================================ #
-    # IDEA (owner spec, roadmap A): with a per-env PROBABILITY, a GENTLE random in-plane shove is injected on the
-    # TARGET at a RANDOM time during the grasp APPROACH; the solver is "informed" only after a perception
-    # SENSE-DELAY. Two collaborative branches follow:
-    #   * informed BEFORE the close -> ABORT, rise a LITTLE, SMOOTHLY PIVOT / "chase" the new pose, close there.
-    #   * informed only AFTER the close -> the grasp closed on nothing -> FAIL -> rise a LITTLE -> re-locate +
-    #     re-grasp the new pose (failure -> recover -> replan data).
-    # ONE mechanism, BOTH modes, on the SAME smooth path (BatchExecutor + densify). The recovery/chase RISE is
-    # SMALL (RETRY_RISE) so the arm stays dexterous (no near-singularity straighten). The execution is PER-ENV
-    # with NO cross-env barrier: a held env never idles in the air through another env's recovery (owner HARD
-    # rule -- see the seg1/seg2/seg3 design below).
-    # ``DISTURB`` DEFAULTS TO 0 -> the CLEAN single-trajectory pick-place (the foundation, the bulk fine-tune
-    # data, and what the grasp-solving runs use). Set DISTURB>0 (e.g. 0.34) to OPT IN to failure-recovery data.
+    # With a per-env PROBABILITY, a random in-plane shove is injected on the TARGET at a RANDOM time during the
+    # grasp APPROACH; the solver is "informed" only after a perception SENSE-DELAY. On the owner's simple logic:
+    # informed BEFORE the close -> don't close, READ the object's ground-truth pose + grasp there; informed AFTER ->
+    # if the attempt still caught the object keep going + place it, else reopen/rise/READ/re-grasp. Every re-grasp
+    # reads the object's full 6-DOF ground-truth pose (god-mode), so it HITS however the shove relocated/rotated/
+    # tumbled it. RETRY_RISE keeps the recover/chase rise small (dexterous, no near-singularity straighten).
+    # ``DISTURB`` DEFAULTS TO 0 -> the CLEAN single-trajectory pick-place (the foundation + bulk fine-tune data).
+    # Set DISTURB>0 (e.g. 0.34) to OPT IN to failure-recovery data.
     DIST_PROB = float(os.environ.get("DISTURB", "0"))
     dspec = DisturbanceSpec.sample(cube, N, rng, prob=DIST_PROB)
+    # NOTE (recovery design, owner-directed): the disturbance is DELIBERATELY UNCONSTRAINED -- the shove may
+    # SLIDE the cube, ROTATE it, or TUMBLE it onto an edge/another face; the cube's new pose+orientation can be
+    # COMPLETELY different. The god-mode RECOVERY does NOT depend on the cube staying flat: it rises a little for
+    # view, READS the cube's full 6-DOF ground-truth pose (position AND orientation), and re-grasps it THERE.
+    # So we do NOT lower the cube CoM or soften the shove to keep it flat -- that would be cutting the corner.
     # the running per-env cube REST z (table top + half cube) -> the predicted-grasp z for the re-grasp.
     cube_rest_z = root0[:, 2].copy()
     # SMOOTH LOW retry/chase lift: rise only ~10 cm -- just enough to clear the cube + free the view to re-approach
@@ -718,83 +724,15 @@ def collect(N, seed, data_dir, out_dir, target=None):
                   f"step{stp} seg[{lbl}]", flush=True)
         return T_
 
-    def approach_close_lift_wps(start_p, start_q, rise_p, cx, cy, env_i, regrasp_tilt=None,
-                                start_grip=OPEN):
-        """Build a SMOOTH, singularity-robust re-grasp at the cube's CURRENT pose (cx,cy) FROM the arm's current
-        pose -- the ONE builder for BOTH the CHASE pivot and the RETRY re-grasp. ``env_i`` selects the per-env
-        arm side / yaw for the grasp quat.
-
-        ``regrasp_tilt`` (TASK 0 fix): the grasp tilt to use AT the shoved pose. When the cube is shoved to a NEW
-        pose, the ORIGINALLY-planned ``grasp_tilt[env_i]`` (chosen for the OLD pose) can SATURATE the wrist at the
-        new reach (verified: DISTURB=0.5 -> 2/16 recovery demos hit j4=1.57). So the caller RE-RUNS the
-        wrist-margin relax-ladder (``select_grasp_tilt_at``) at the shoved (cx,cy) and passes the result here;
-        ``None`` falls back to the original tilt (used by no current call site, kept for safety).
-
-        ``start_grip`` (the NO-HOLD fix): the gripper value the arm arrives at the start pose holding. For the
-        AFTER-CLOSE recovery the arm arrives with the gripper CLOSED-on-nothing (start_grip=CLOSE); for the CHASE
-        the gripper is already OPEN through the aborted approach (start_grip=OPEN). The RISE segment commands the
-        gripper OPEN, so densify RAMPS it CLOSE->OPEN *WHILE THE ARM IS RISING* -- the reopen overlaps the rise
-        MOTION instead of being a static hold-pose-while-gripper-opens dwell at the apex (the 2.2 s freeze the
-        owner rejects). The arm is never static while the hand reopens.
-
-        NO-HOLD re-architecture (the ZERO-mid-trajectory-hold fix): the OLD builder REORIENTED LOW as a SEPARATE
-        pure-rotation segment (``reorient`` waypoint at the start pose), THEN rose, THEN descended. With the
-        gripper reopening across the lift->start boundary that produced a static-arm REOPEN dwell at the apex, AND
-        a second static dwell on the (often near-no-op) low reorient -- a ~22-frame freeze. The fix OVERLAPS the
-        reorient AND the reopen WITH the RISE: the rise segment translates UP, SLERPs the wrist to the re-selected
-        comfortable grasp quat ``gqi``, and ramps the gripper OPEN, ALL in one continuously-moving densified
-        segment (no ``lin<1e-4 & ang<1e-3`` dwell -> no static run). The descend then completes at ``gqi`` (pure
-        translation). The arm keeps MOVING from the moment it leaves the start pose until the brief grasp-CLOSE
-        settle at the re-grasp -- the only remaining dwell, identical to the clean grasp.
-
-        TASK-0 wrist comfort (the recovered-demo j4=1.57 saturation): the rise apex is a HIGH EE pose, and a
-        recovery at a HIGH table already starts the close near EEz~0.44 -- a +10cm rise at a steep (old) top-down
-        orientation SATURATES the wrist. We still CAP the apex EE height (rise only enough to clear the cube for a
-        clean re-descend, not into the saturation band) AND reach the apex ALREADY at the relaxed tilt ``gqi`` (the
-        rise SLERPs to it), so the high-EE rise + descend happen off the wrist limit. The branch-flip the old split
-        guarded against is avoided by ``select_grasp_tilt_at(apex_z=...)`` having vetted the wrist along the apex->
-        descend column at ``gqi``, and by the warm-started single-sample IK tracking the rise continuously (the
-        reorient is a moderate <=~24deg tilt change, well inside one branch -- verified by the all-phase dq gate)."""
-        gci = np.array([cx, cy, cube_rest_z[env_i] + grasp_dz])
-        tlt = float(grasp_tilt[env_i] if regrasp_tilt is None else regrasp_tilt)
-        gqi = grasp.grasp_quat_at(gctx, env_i, cx, cy, tlt)     # re-selected wrist-margin tilt at the shoved pose
-        tzi = _R_from_wxyz(gqi) @ np.array([0, 0, 1.0])
-        # CAP the apex: rise only enough above the cube to clear it for the re-descend (RETRY_RISE), but never so
-        # high that the EE climbs into the wrist-saturation band. The apex tool-z is capped at the cube grasp z +
-        # a modest clearance so EEz stays comfortable even at a high table (the over-stretch ceiling fix, applied
-        # to the recovery rise). The rise reaches the apex already at the relaxed tilt ``gqi``.
-        #
-        # NO-HOLD apex PLACEMENT (the critical geometric fix): the apex sits over the PREDICTED grasp XY (not the
-        # OLD/start XY) at a height that clears the cube (capped to cube_grasp_z + RETRY_RISE). This makes the
-        # start->apex segment a REAL translation FOR BOTH branches -- and that is what lets the reopen+reorient
-        # ride MOTION instead of freezing:
-        #   * CHASE       (start LOW at the old pose, grip already OPEN): apex is up AND over to the predicted XY
-        #                 -> a real diagonal transit.
-        #   * AFTER-CLOSE (start already LIFTED at the old pose, grip CLOSED): the apex z == the empty-lift z, but
-        #                 the apex is OVER the predicted XY, so the segment is a real HORIZONTAL transit (the arm
-        #                 slides across to above the new pose). If the apex coincided with the start (old XY, same
-        #                 z), the segment would be a zero-length DWELL and the reopen/reorient would freeze there
-        #                 -- exactly the 22-frame apex hold this fix removes. Aiming the apex at the predicted XY
-        #                 guarantees motion to carry the gripper reopen + the wrist reorient.
-        apex = gci.copy()                                            # over the PREDICTED grasp XY ...
-        apex[2] = min(float(rise_p[2]), float(gci[2]) + RETRY_RISE)  # ... at a cube-clearing, non-saturating height
-        return [
-            ("start",    start_p,            start_q, start_grip),
-            # (1) TRANSIT to the apex OVER the predicted pose: translate up/over, SLERP the wrist start_q->gqi
-            # (reorient folded in), and ramp the gripper start_grip->OPEN -- ALL in this one moving segment. The
-            # apex aims at the predicted XY so the segment always MOVES (never a dwell) -> no static reopen/reorient
-            # hold; the arm keeps moving while the hand reopens and the wrist reorients.
-            ("rise",     apex,               gqi,     OPEN),
-            ("pre",      gci - APP * tzi,    gqi,     OPEN),        # (2) pure-translation descend to pre-grasp
-            ("at",       gci,                gqi,     OPEN),
-            ("close",    gci,                gqi,     CLOSE),       # the ONLY dwell: the brief grasp-CLOSE settle
-            ("lift",     gci + [0, 0, LIFT], gqi,     CLOSE),
-        ], gqi
+    # The disturbed re-grasp builders + the chase / read-based-recover / fire-step ASSEMBLY live in
+    # skills/disturbance.py (modularity 3/3); collect() builds a DisturbExec context (below) and calls
+    # disturbance.build_phase1 / build_phase2 / fire_steps_from_plan. The CLEAN path stays here.
 
     Tlist = []
     recovery_attempts = np.zeros(N, np.int32)
     disturb_phase = np.array(["none"] * N, dtype=object)          # "before_close" | "after_close" | "none"
-    chased = np.zeros(N, bool)                                    # informed-before-close -> pivoted/chased
+    chased = np.zeros(N, bool)                                    # informed before the close -> read + grasp
+    held = np.zeros(N, bool)                                      # after-close grasp ATTEMPT still caught the cube
     # Per-env grasp orientation: prefer top-down, relax to the smallest forward tilt that keeps the WRIST off
     # its limit through the LIFT (the RoboLab-faithful natural-posture fix; ``select_grasp_tilt`` above). The
     # chosen per-env tilt is kept so the disturbance chase/retry re-grasps reuse it (stay natural too).
@@ -818,16 +756,10 @@ def collect(N, seed, data_dir, out_dir, target=None):
     # disturbance path AFTER this call, so it must NOT be frozen into the context).
     place_tilt = grasp.select_place_tilt(gctx, solve, gqA)
 
-    # ---- TASK 0: RE-SELECT the grasp/place tilt AT the SHOVED cube pose for the disturbance chase/recovery -----
-    # The chase (seg2) + recovery (seg3) re-grasp the cube at its NEW (shoved) pose. Reusing the ORIGINAL
-    # ``grasp_tilt``/``place_tilt`` (chosen for the OLD pose + OLD reach) can SATURATE the wrist there (verified:
-    # DISTURB=0.5 N=16 -> 2/16 recovery demos j4=1.57). FIX: re-run the EXACT SAME wrist-margin relax-ladder
-    # (same WRIST_LIMIT/WRIST_MARGIN/ELBOW_MIN, same warm-start pre+lift / carry probe -- the SCORING is
-    # unchanged) at the shoved grasp centre / re-grasp orientation, per env. These are single-env wrappers around
-    # the same batched ``solve()`` probe used by select_grasp_tilt/_carry_posture (no IK-solver change, the
-    # relax policy is identical), so the re-grasp stays as natural as the first grasp. ``grasp.select_grasp_tilt_at``
-    # / ``grasp.select_place_tilt_at`` (skills/grasp.py; their ``_posture_at_pick_env`` probe is a private helper
-    # there) are the extracted single-env relax ladders -- called per disturbed env in the trajectory assembly below.
+    # The disturbance re-grasp RE-SELECTS its wrist-margin tilt AT the cube's read pose (the original grasp_tilt was
+    # chosen for the OLD pose + reach and can saturate the wrist at the new one). That re-selection lives in
+    # skills/disturbance.py (``select_recovery_grasp``, full-6-DOF) using the same batched ``solve`` probe + the same
+    # WRIST_LIMIT/WRIST_MARGIN/ELBOW_MIN thresholds as the first grasp -- so the recovery posture is as natural.
 
     def pick_wps(i):
         """home -> pre -> at -> at -> close -> lift for env i: the orientation-aware top-down approach + a FIRM
@@ -880,6 +812,19 @@ def collect(N, seed, data_dir, out_dir, target=None):
             ("go_home", home_tool[i],           home_tquat[i], OPEN),  # smooth densified RETURN HOME (recorded)
         ]
 
+    # per-env recorded-frame ranges, by phase (for the disturbed two-phase read-based recovery). Each entry is the
+    # half-open [start,end) index into the shared recording lists (acts/jpos/...) that this PHASE contributed. The
+    # clean path produces ONE phase covering every env; the disturbed path produces two and the writer assembles
+    # each env's demo from ITS phase(s). Default = the whole recording is phase 0 (set after the clean run).
+    phase_bounds = []        # list of (p_start, p_end) recorded-frame indices, one per run_phase call
+    env_phases = None        # per-env list of phase indices to concatenate (None => single phase, all envs)
+
+    def _run_phase_bounded(wps, **kw):
+        s = len(acts)
+        T_ = run_phase(wps, **kw)
+        phase_bounds.append((s, len(acts)))
+        return T_
+
     if not (dspec.any and DIST_PROB > 0):
         # ===================== CLEAN PATH: ONE continuous per-env trajectory (NO barrier) =====================
         # home -> pre -> at -> close -> lift -> carry -> lower -> release -> HOME, run as a SINGLE smooth batch.
@@ -887,158 +832,112 @@ def collect(N, seed, data_dir, out_dir, target=None):
         # env (the idle-in-the-air bug came entirely from the old staged per-phase barriers). Faster envs reach
         # home first and the recorder TRIMS each env's idle-home tail -> VARIABLE-LENGTH demos (natural). ----
         wps = [pick_wps(i) + place_tail(i, gc[i] + [0, 0, LIFT], gqA[i]) for i in range(N)]
-        Tlist.append(run_phase(wps, settle_steps=40, tag="pick-place-home"))
+        Tlist.append(_run_phase_bounded(wps, settle_steps=40, tag="pick-place-home"))
     else:
-        # ===== DISTURBANCE PATH v3: a SINGLE continuous per-env trajectory, ZERO mid-trajectory holds =====
-        # The old staged seg1/seg2/seg3 path FROZE the normal envs LIFTED IN THE AIR while the chase/recover envs
-        # pivoted (a per-env barrier the owner forbids). v3 pre-plans EACH env's FULL trajectory up front and runs
-        # it in ONE continuous pass, EXACTLY like the clean path -- a clean env terminates early (shorter demo), a
-        # chased/recovered env's trajectory is simply LONGER, but NO env ever holds waiting for another.
-        #
-        # The chase/recover re-grasp must aim at the cube's SHOVED pose, which physically happens DURING the run.
-        # Because the shove is a god-mode impulse WE control (known velocity + the per-env object friction), we
-        # PREDICT the shoved resting pose at BUILD TIME: rest = fire_xy + unit(v) * |v|^2 / (2*mu*g) (Coulomb
-        # slide; mu = the object's friction). Calibrated to ~1.1cm mean / 1.7cm max error on the cube
-        # (scripts/temp/calib_shove_predict.py) -- well within the open-claw span, so the re-grasp (planned at the
-        # predicted pose) still cages the real cube. The shove STILL fires via the during_step hook (a real
-        # physics slide); we only PREDICT where it lands so the whole per-env path is known up front (required for
-        # the single continuous run). chase-vs-after-close is ALSO resolved at build time (it depends only on the
-        # fire-fraction band + the sense-delay, no sim read), so the matching trajectory SHAPE is pre-planned.
-        # ``DISTURB=0`` (default) never reaches here.
+        # ===== DISTURBANCE PATH: READ-BASED recovery, HOLD-FREE (modular -> skills/disturbance.py) =====
+        # The shove fires at a random approach-time; the solver reacts on the owner's simple logic (see the module
+        # docstring): informed BEFORE the close -> chase (don't close; read the cube's ground-truth pose + grasp
+        # there); informed AFTER -> the grasp ATTEMPT fired -> if it still caught the cube, keep going + place it;
+        # if it missed, reopen/rise/read/re-grasp. Every re-grasp READS the cube's ACTUAL full 6-DOF ground-truth
+        # pose (god-mode) and grasps there, so it HITS the cube however the shove relocated/rotated/landed it.
+        # Hold-free via two batches: PHASE 1 = the approach (+attempt); READ (a god-mode check + an unrecorded
+        # settle, no arm freeze in the demo); PHASE 2 = place / re-grasp -> place -> home. The writer assembles
+        # each env's demo from its own phase frames and collapses the inter-phase pad. ``DISTURB=0`` never gets here.
 
-        # (1) approach length (control steps) -> resolve chase-vs-after-close at build time. The approach is the
-        # SAME home->pre->at->at the clean pick uses; its densified length sets the window the close lands at.
-        wpsApp = [pick_wps(i)[:4] for i in range(N)]              # home -> pre -> at -> at (open, the approach)
-        _, _, _, lblApp, T_App = ex.plan(wpsApp)
-        chased = dspec.will_be_informed_before_close(T_App)      # informed BEFORE the close -> chase (else recover)
-        afterclose = dspec.disturbed & ~chased                   # informed only after the close -> close-on-nothing
+        # The DisturbExec context: the de-closured former environment of the in-line assembly. The grasp PLANNERS
+        # come from skills/grasp.py via gctx + solve; this carries the heights/grips + the task's own pick/place
+        # waypoint builders (pick_wps / pick_wps_nodwell / place_tail). gqA / place_tilt are MUTATED by the assembly
+        # (the re-grasping envs' executed orientation), so they are passed explicitly, not frozen in.
+        dx = DisturbExec(gctx=gctx, solve=solve, N=N, gc=gc, grasp_dz=grasp_dz, APP=APP, LIFT=LIFT,
+                         RETRY_RISE=RETRY_RISE, OPEN=OPEN, CLOSE=CLOSE,
+                         pick_wps=pick_wps, pick_wps_nodwell=pick_wps_nodwell, place_tail=place_tail)
+
+        # (1) resolve CHASE (informed before the close) vs AFTER-CLOSE (informed only after), at build time.
+        chased, afterclose, T_App = disturbance.resolve_branches(dspec, ex, pick_wps, N)
         disturb_phase[chased] = "before_close"
         disturb_phase[afterclose] = "after_close"
-        print(f"[COLLECT] disturbance v3 (single-pass): disturbed {int(dspec.disturbed.sum())} env(s) "
+        print(f"[COLLECT] disturbance (read-based recovery): disturbed {int(dspec.disturbed.sum())} env(s) "
               f"{np.where(dspec.disturbed)[0].tolist()} (prob={DIST_PROB}, approach_T={T_App}); "
-              f"before_close(chase)={int(chased.sum())} after_close(recover)={int(afterclose.sum())}", flush=True)
+              f"before_close(chase)={int(chased.sum())} after_close={int(afterclose.sum())}", flush=True)
 
-        # (2) PREDICT each disturbed env's shoved grasp-centre xy (build-time physics; the owner's Coulomb-slide
-        # formula d = |v|^2 / (2*mu*g)). ``mu`` is the EFFECTIVE slide friction of the object on the table -- NOT
-        # the nominal spec friction (1.0) but the value CALIBRATED against the real shove on the firm table
-        # (scripts/temp/calib_shove_predict.py): at mu=0.85 the predicted rest xy matches the REAL settled xy to
-        # ~1.2cm mean / 1.6cm max (mu=1.0 slightly UNDER-predicts the slide -> the re-grasp lands a touch short).
-        # SHOVE_MU overrides for tuning; defaults to the calibrated 0.85. The shove fires early in the approach
-        # while the object is still settled, so the fire xy is the settled grasp-centre xy (groot0). Undisturbed
-        # envs keep their settled xy (no shove).
-        mu_obj = float(os.environ.get("SHOVE_MU", 0.85))
-        shoved_xy = dspec.predict_shoved_xy(groot0[:, :2], mu_obj)   # (N,2) predicted rest xy of the grasp centre
+        # (2) PHASE-1 trajectories: EVERY env is a pick-to-LIFT (uniform length -> NO long inter-phase pad, the
+        # ROOT no-hold fix). undisturbed/AFTER-CLOSE = pick (a grasp / a grasp ATTEMPT); CHASE = approach->(abort,
+        # no close)->rise OPEN. Phase 2 does ALL the placing/recovery. Phase 1 leaves every env LIFTED/risen.
+        full_wps = disturbance.build_phase1(dx, dspec, chased, afterclose, gqA)
 
-        # (3) build EACH env's FULL trajectory up front (one continuous waypoint stream that DENSIFIES to its own
-        # length -> per-env natural termination, no padding hold mid-trajectory):
-        #   * undisturbed  : home->pre->at->close->lift->place->home  (single-at pick_wps_nodwell + place_tail)
-        #   * chased       : home->pre->at(old) -> re-aim(rise[reorient+reopen folded in])->pre->at(PREDICTED)->
-        #                    close->lift->place->home  (the close happens ONLY at the predicted pose)
-        #   * after-close  : home->pre->at->close(empty,old)->lift(empty) -> recover(rise[reorient+REOPEN folded in
-        #                    over the predicted pose]->pre->at->close->lift) ->place->home  (the old-pose close
-        #                    grabs nothing -> recover re-grasps; the gripper REOPENS *during* the rise, not frozen)
-        # The chase/recover RE-GRASP reuses the approach_close_lift_wps builder, whose RISE segment translates to
-        # the apex OVER the predicted pose WHILE slerping the wrist to gqi (reorient) and ramping the gripper open
-        # (reopen) -- one continuously-MOVING segment, so there is NO static reopen/reorient hold (the no-hold fix);
-        # the descend->at is pure translation. The grasp/carry tilt is RE-SELECTED at the predicted shoved pose
-        # (the same wrist-margin relax ladders), and the warm single-sample IK tracks the rise without a branch flip.
-        recovery_attempts[afterclose] = 1                        # the after-close env does one recover re-grasp
+        # (3) per-env ABSOLUTE fire-step within each env's first open-approach window of the PHASE-1 plan, then arm
+        # the harness; the shove fires via the during_step hook at that step (a real physics slide).
+        fire_step_abs, T_full = disturbance.fire_steps_from_plan(dspec, ex, full_wps, N)
+        dspec.arm(fire_step_abs)
 
-        full_wps = []
-        for i in range(N):
-            if not dspec.disturbed[i]:
-                # undisturbed env: the normal pick+place, but with the SINGLE-at pick (pick_wps_nodwell) so its
-                # close dwell stays at the gate (~8 frames) -- the clean DISTURB=0 path (separate branch above)
-                # still uses the double-at pick_wps byte-for-byte.
-                full_wps.append(pick_wps_nodwell(i) + place_tail(i, gc[i] + [0, 0, LIFT], gqA[i]))
-                continue
-            # end of the FIRST approach = the "at" OLD pose (a known waypoint: gc[i] held at gqA[i]); chain the
-            # re-grasp off it WITHOUT a sim read.
-            old_p = gc[i].copy()
-            old_q = gqA[i].copy()
-            px, py = float(shoved_xy[i, 0]), float(shoved_xy[i, 1])
-            gci_pred = np.array([px, py, cube_rest_z[i] + grasp_dz])
-            # rise apex above the OLD pose, capped to the predicted-grasp z + RETRY_RISE (matches the builder cap)
-            sp = old_p.copy(); sp[2] = max(old_p[2], cube_rest_z[i] + grasp_dz) + RETRY_RISE
-            apex_z = min(float(sp[2]), float(gci_pred[2]) + RETRY_RISE)
-            rt = grasp.select_grasp_tilt_at(gctx, solve, i, gci_pred, apex_z=apex_z)  # natural posture at the predicted shoved pose
-            if chased[i]:
-                # CHASE: the first approach reaches the old pose but NEVER closes (gripper stays OPEN through it);
-                # immediately re-aim to the predicted pose and close THERE. The first approach uses a SINGLE "at"
-                # (NOT the clean pick's double "at,at" pre-close settle dwell) -- the chase never closes at the old
-                # pose, so a settle dwell there would be a pointless mid-trajectory HOLD (the arm idling low with
-                # the gripper open before it rises to chase). Flowing home->pre->at(old) straight into the re-aim
-                # (rise[reorient folded in]->pre(pred)->at->close->lift) keeps the whole chase continuously moving:
-                # the builder's RISE segment carries the reorient (start_q->gqi SLERP) WHILE translating up, so
-                # there is NO static reorient/rise dwell -- the arm flows at(old) straight into the rising re-aim.
-                regrasp, gqi = approach_close_lift_wps(old_p, old_q, sp, px, py, i, regrasp_tilt=rt,
-                                                       start_grip=OPEN)
-                approach = pick_wps(i)[:3]                        # home->pre->at(old), single, all OPEN (no settle)
-                wp = approach + regrasp[1:]                       # regrasp[0]=="start"==at(old); drop the dup
-            else:
-                # AFTER-CLOSE: the first approach CLOSES on the old (now-empty) pose -> grabs nothing -> recover.
-                # The empty pick uses a SINGLE "at" (not the clean pick's "at,at" pre-close settle dwell): the
-                # empty close on nothing needs no extra pre-close settle, so a second at would just be a pointless
-                # static HOLD at the old pose. Then the recover re-grasp at the predicted pose, then place.
-                empty_pick = pick_wps_nodwell(i)                  # home->pre->at->close(empty)->lift(empty)
-                lift_old_p = empty_pick[-1][1]                    # the empty lift pose (old gc + LIFT)
-                # recover transits from the empty lift over to the predicted pose, reopening + reorienting EN ROUTE.
-                # start_grip=CLOSE: the arm arrives at the empty lift with the gripper CLOSED-on-nothing. The
-                # builder's RISE segment ramps it CLOSE->OPEN WHILE rising (the reopen overlaps the rise MOTION),
-                # so there is NO static reopen-while-frozen dwell at the apex (the 2.2 s freeze the owner rejects).
-                regrasp, gqi = approach_close_lift_wps(lift_old_p, gqA[i], sp, px, py, i, regrasp_tilt=rt,
-                                                       start_grip=CLOSE)
-                # regrasp[0]=="start"==the empty-lift pose (same pos/quat/grip=CLOSE as empty_pick[-1]); DROP it so
-                # the empty lift flows STRAIGHT into the rise (no duplicate-waypoint dwell). The rise then ramps the
-                # gripper open while moving up -- the reopen rides the rise, never a static frozen-apex dwell.
-                wp = empty_pick + regrasp[1:]
-            gqA[i] = gqi
-            place_tilt[i] = grasp.select_place_tilt_at(gctx, solve, i, gqi)  # carry tilt at the new (predicted) grasp quat
-            full_wps.append(wp + place_tail(i, wp[-1][1], gqi))   # wp[-1] = the re-grasp's final ("lift", pos, ..)
-            if os.environ.get("TILT_DEBUG"):
-                tag = "chase" if chased[i] else "recover"
-                print(f"[TILT_DEBUG] {tag} env{i}: orig grasp_tilt={grasp_tilt[i]:.0f} -> reselect={rt:.0f} "
-                      f"place_tilt={place_tilt[i]:.0f} (pred shoved xy={np.round([px,py],3).tolist()})", flush=True)
-
-        # (4) per-env ABSOLUTE fire-step within EACH env's OWN first approach (located by the densified label
-        # stream: the last step whose label is still in the open approach -- pre/at -- BEFORE the first close).
-        # Firing at ``fire_frac`` of the way into that pre-close window lands the shove early enough that (a) a
-        # chase env can re-aim and (b) an after-close env's cube has slid away by its (old-pose) close. This
-        # replaces the staged reset_window(SHARED approach_T) with a per-env step from the SINGLE plan.
-        _, _, _, lblFull, T_full = ex.plan(full_wps)
-        fire_step_abs = np.zeros(N, np.int32)
-        for i in range(N):
-            if not dspec.disturbed[i]:
-                continue
-            pre_close = [t for t in range(T_full)
-                         if lblFull[t][i] in ("pre", "at") ]       # this env's first open-approach window
-            # restrict to BEFORE the first 'close' label (the empty close for after-close; the only close otherwise
-            # appears after the re-aim, which is also fine to fire before)
-            close_ts = [t for t in range(T_full) if lblFull[t][i] == "close"]
-            if close_ts:
-                pre_close = [t for t in pre_close if t < close_ts[0]]
-            if pre_close:
-                j = int(round(float(dspec.fire_frac[i]) * (len(pre_close) - 1)))
-                fire_step_abs[i] = pre_close[max(0, min(j, len(pre_close) - 1))]
-        dspec.arm_single_pass(fire_step_abs)
-
-        # (5) run the WHOLE thing as ONE continuous batch -- the shove fires via the during_step hook at each
-        # env's fire-step (a real physics slide). NO mid-pass barrier; every env runs to its own home + terminates.
-        Tlist.append(run_phase(full_wps, settle_steps=40,
-                               during_step=lambda t, lab: dspec.tick(t), tag="pick-place-home(disturbed)"))
+        # (4) RUN PHASE 1 -- one continuous batch; the shove fires per env. NO mid-pass barrier.
+        Tlist.append(_run_phase_bounded(full_wps, settle_steps=40,
+                                        during_step=lambda t, lab: dspec.tick(t), tag="phase1(disturbed)"))
         fired = dspec.fired_any()
         print(f"[COLLECT] disturbance: shoved {int(fired.sum())} env(s) {np.where(fired)[0].tolist()} "
               f"(fire steps={fire_step_abs[dspec.disturbed].tolist()})", flush=True)
+
+        # (5) GOD-MODE OUTCOME CHECK (the owner's branching): for the AFTER-CLOSE envs, did the grasp ATTEMPT catch
+        # the cube despite the disturbance? Read the cube + the active EE NOW (the arm is lifted holding-or-not).
+        cube_now = np_(cube.get_pos())
+        ee_now = np.where(side_is_left[:, None], np_(ee["l"].get_pos()), np_(ee["r"].get_pos()))
+        held = disturbance.grasp_succeeded(cube_now, ee_now, cube_rest_z) & afterclose   # still grasped after the shove
+        # For the MISS + CHASE envs the cube must settle on the table before we read its pose (the chase never
+        # grabbed it; an after-close MISS dropped it). Step the sim a little (arm held at its phase-1-end pose) so
+        # any in-flight cube lands + settles on a FACE, THEN read. These steps are NOT recorded -> they add NO frame
+        # to the saved demo (no hold in the data); pure god-mode bookkeeping. A grasped-through / undisturbed env
+        # holds its cube during these steps (gripper closed) -- fine, those place from the lift, not from the read.
+        _hold_cmd = np_(robot.entity.get_dofs_position())
+        for _ in range(int(os.environ.get("SHOVE_SETTLE", 100))):
+            robot.entity.control_dofs_position(_hold_cmd); stage.scene.step()
+        # READ the cube's ACTUAL ground-truth pose+ORIENTATION god-mode (instantaneous). For a MISS/CHASE the cube
+        # is at rest on a FACE on the table (a cube cannot rest on an edge).
+        actual_pos = np_(cube.get_pos())                            # (N,3) ground-truth world xyz
+        actual_quat = np_(cube.get_quat())                          # (N,4) ground-truth world quat (wxyz)
+        actual_yaw = disturbance.settled_yaw_from_quat(actual_quat)  # (N,) in-plane yaw (diagnostic)
+        # OFF-TABLE / OUT-OF-REACH guard: an UNCONSTRAINED shove can knock a light/thin object clean OFF the table
+        # (it then free-falls -- there is no ground plane -- to z = -metres) or out to an unreachable xy. Such an
+        # env is genuinely UNRECOVERABLE (the re-grasp would chase a phantom 9 m target -> a degenerate trajectory
+        # -> a solver NaN). We detect it from the ground-truth read and do NOT attempt recovery: the arm just goes
+        # home (gripper open), and the place gate marks the demo failed -- a legit hard-edge outcome, correctly
+        # labelled rather than crashing. (The recovery still handles ANY on-table pose: slid / rotated / tumbled.)
+        _reach = np.hypot(actual_pos[:, 0], actual_pos[:, 1])
+        on_table = np.isfinite(actual_pos).all(axis=1) & (actual_pos[:, 2] > tabZ - 0.04) \
+            & (actual_pos[:, 2] < tabZ + 0.20) & (actual_pos[:, 0] > 0.18) \
+            & (_reach > 0.24) & (_reach < 0.60)                     # on the object table, inside the grasp workspace
+        recoverable = (~dspec.disturbed) | held | on_table          # held envs hold their cube; others need it on-table
+        # the arm's TOOL pose at phase-1 end (start of phase 2): every env rose/lifted to gc+LIFT (the comfortable
+        # lift height) at its phase-1 grasp quat -- a uniform, wrist-comfortable start for the phase-2 re-grasp/place.
+        lift_start_p = (gc + np.array([0, 0, LIFT])).astype(np.float64)
+        lift_start_q = gqA.copy()
         if os.environ.get("DISTURB_DIAG"):
-            cf = np_(cube.get_pos())
             for i in np.where(dspec.disturbed)[0]:
-                # predicted shoved xy vs the cube's FINAL xy (the re-grasp aimed at the prediction; the cube
-                # should now be in/near the bowl if placed, or near the predicted pose if the grasp missed).
-                pe = np.hypot(cf[i, 0] - shoved_xy[i, 0], cf[i, 1] - shoved_xy[i, 1]) * 100
-                print(f"[DISTURB_DIAG] env{i} {'chase' if chased[i] else 'recover'}: "
-                      f"settled_xy={np.round(groot0[i,:2],3).tolist()} pred_shoved={np.round(shoved_xy[i],3).tolist()} "
-                      f"final_cube_xy={np.round(cf[i,:2],3).tolist()} |final-pred|={pe:.1f}cm "
+                tag = "chase" if chased[i] else ("grasped-thru" if held[i] else "recover")
+                czw = _R_from_wxyz(actual_quat[i]) @ np.array([0, 0, 1.0])
+                tilt_off = np.degrees(np.arccos(np.clip(czw[2], -1, 1)))
+                print(f"[DISTURB_DIAG] {tag} env{i}: orig_xy={np.round(groot0[i,:2],3).tolist()} "
+                      f"GT_xy={np.round(actual_pos[i,:2],3).tolist()} GT_z-tab={(actual_pos[i,2]-tabZ[i])*100:.1f}cm "
+                      f"GT_yaw={np.degrees(actual_yaw[i]):.0f}deg face-up-tilt={tilt_off:.0f}deg "
                       f"bowl_xy={np.round([bowx[i],bowy[i]],3).tolist()}", flush=True)
+
+        # (6) PHASE-2: per-env, place the held cube (undisturbed / grasped-through) from the lift, OR re-grasp the
+        # missed/chase cube at its full 6-DOF ground-truth pose, then place->home. EVERY env continues here from its
+        # phase-1 lift, so there is no done-env holding -> no inter-phase pad.
+        phase2_wps, recovery_attempts, p2_diag = disturbance.build_phase2(
+            dx, chased, afterclose, held, recoverable, lift_start_p, lift_start_q,
+            actual_pos[:, :2], actual_pos[:, 2], actual_quat, gqA, place_tilt, home_tool, home_tquat)
+        Tlist.append(_run_phase_bounded(phase2_wps, settle_steps=40, tag="phase2"))
+        if os.environ.get("DISTURB_DIAG"):                          # post-phase-2: outcome per disturbed env
+            cf2 = np_(cube.get_pos())
+            for i in np.where(dspec.disturbed)[0]:
+                lifted = (np.max(np.stack(cubez, 1)[i]) - root0[i, 2]) * 100
+                rxy = np.hypot(cf2[i, 0] - bowx[i], cf2[i, 1] - bowy[i]) * 100
+                tag = "chase" if chased[i] else ("grasped-thru" if held[i] else "recover")
+                print(f"[DISTURB_DIAG] result env{i} ({tag}): max_lift={lifted:.1f}cm "
+                      f"final_cube_xy={np.round(cf2[i,:2],3).tolist()} bowl_dist={rxy:.1f}cm", flush=True)
+        # per-env phase concatenation: EVERY env = phase 0 (pick to lift) + phase 1 (place / re-grasp). Phase 1 is
+        # uniform-length so the inter-phase boundary is just the brief lift/grasp settle (the writer collapses it).
+        env_phases = [[0, 1] for _ in range(N)]
 
     T = sum(Tlist)
     lift_pos_z = np.max(np.stack(cubez, 1), axis=1)            # per-env max cube height reached during the run
@@ -1087,32 +986,31 @@ def collect(N, seed, data_dir, out_dir, target=None):
           + (f"  worst env{worst_e}: {pen_tracker.worst_names()[worst_e]}" if pen_mm.max() > 0 else ""),
           flush=True)
 
-    # ---- DISTURBANCE / RECOVERY summary (BOTH training signals). ``disturbed``: the cube was shoved during the
-    # grasp. ``disturb_phase``: was the solver informed before/after the close. ``disturb_outcome`` per env:
-    #   "chased"    -> informed BEFORE close: ABORTED the close, pivoted to the new pose, ended PLACED
-    #                  (moving-object CHASE data). ``recovery_attempts``==0.
-    #   "recovered" -> informed AFTER close and ended PLACED: either the close-on-nothing FAILED and a smooth
-    #                  low retry re-grasped the new pose (``recovery_attempts``>0, the failure->recover data),
-    #                  OR the late shove was benign and the grasp rode through it (``recovery_attempts``==0).
-    #   "failed"    -> disturbed but did NOT end cleanly placed (a legit hard edge the place/pen gate rejects).
-    #   "none"      -> not disturbed.
-    # ``recovery_attempts`` separates the genuine retry (>0) from the benign-survival (0) inside "recovered".
-    # ``recovered`` (legacy bool attr) = disturbed AND ended placed (chased OR recovered), kept for back-compat. ----
+    # ---- DISTURBANCE / RECOVERY summary (the failure-recovery training signals). ``disturb_outcome`` per env:
+    #   "chased"       -> informed BEFORE the close: didn't close, read the cube's new pose + grasped it, PLACED.
+    #   "grasped_thru" -> informed AFTER the close but the grasp ATTEMPT still caught the cube despite the shove
+    #                     -> kept going + PLACED (``recovery_attempts``==0).
+    #   "recovered"    -> informed AFTER the close, the grasp MISSED -> reopen/rise/read/re-grasp, PLACED
+    #                     (``recovery_attempts``==1, the failure->recover data).
+    #   "failed"       -> disturbed but did NOT end cleanly placed (a legit hard edge the place/pen gate rejects).
+    #   "none"         -> not disturbed.
+    # ``recovered`` (legacy bool attr) = disturbed AND ended placed (any of the above), kept for back-compat. ----
     disturbed = dspec.disturbed.copy()
     disturb_outcome = np.array(["none"] * N, dtype=object)
     for i in np.where(disturbed)[0]:
-        if placed[i] and chased[i]:
-            disturb_outcome[i] = "chased"
-        elif placed[i]:
-            disturb_outcome[i] = "recovered"
-        else:
+        if not placed[i]:
             disturb_outcome[i] = "failed"
+        elif chased[i]:
+            disturb_outcome[i] = "chased"
+        elif held[i]:
+            disturb_outcome[i] = "grasped_thru"
+        else:
+            disturb_outcome[i] = "recovered"
     recovered = disturbed & placed                                # disturbed AND ended in a clean place
     n_dist = int(disturbed.sum())
-    n_chased = int((disturb_outcome == "chased").sum())
-    n_recov = int((disturb_outcome == "recovered").sum())
-    n_failed = int((disturb_outcome == "failed").sum())
-    print(f"[COLLECT] disturbance: {n_dist} disturbed ({n_chased} chased, {n_recov} recovered, {n_failed} failed)"
+    counts = {o: int((disturb_outcome == o).sum()) for o in ("chased", "grasped_thru", "recovered", "failed")}
+    print(f"[COLLECT] disturbance: {n_dist} disturbed ({counts['chased']} chased, "
+          f"{counts['grasped_thru']} grasped-thru, {counts['recovered']} recovered, {counts['failed']} failed)"
           f"  recovery_attempts(disturbed)={recovery_attempts[disturbed].tolist() if n_dist else []}", flush=True)
 
     # ---- distractor collision-free metric: each distractor's XY displacement from its SETTLED pose to its
@@ -1147,38 +1045,81 @@ def collect(N, seed, data_dir, out_dir, target=None):
     acts = np.stack(acts, 1); jpos = np.stack(jpos, 1); jvel = np.stack(jvel, 1)   # (N,Tr,14)
     eepos = np.stack(eepos, 1); eequat = np.stack(eequat, 1)
     Tr = acts.shape[1]
-    # ---- PER-ENV NATURAL TERMINATION (owner HARD rule): each trial ends when ITS arm reaches home. The executor
-    # pads every env to the global max T (hold-last-pose) so the slowest env (longest reach / a disturbance
-    # recovery) can finish; a faster env then sits STATIC at home for the tail. That idle-home tail is NOT
-    # recorded -- trim each env to its own last MOTION frame (+ a small settle margin). Demos come out
-    # VARIABLE-LENGTH and that is natural + accepted (LeRobot supports it). Detection is purely on the recorded
-    # joint stream (active + idle arm + gripper): the home hold is exactly static (PD jitter < 1e-4 rad/frame),
-    # real motion is >> 1.5e-3, so the two separate cleanly. NB this only ever trims a STATIC tail -- the
-    # single continuous trajectory has no mid-trajectory hold to trim. ----
-    _frame_motion = np.abs(np.diff(jpos, axis=1)).max(axis=2)     # (N, Tr-1) per-frame max joint delta
-    end_idx = np.full(N, Tr - 1, int)
-    for e in range(N):
-        _mv = np.where(_frame_motion[e] > 1.5e-3)[0]             # frames with real joint motion arriving into them
-        if len(_mv):
-            end_idx[e] = min(Tr - 1, int(_mv[-1]) + 1 + 2)       # +1 the arrival frame, +2 a small settle margin
-    demo_len = (end_idx + 1).astype(int)                         # per-env recorded length (variable)
+    # ---- PER-ENV NATURAL TERMINATION (owner HARD rule: every trial is independent; no env waits for another). The
+    # batched executor steps all envs on a shared clock and pads a finished env's last pose to the batch length, so
+    # the raw recording contains padding. We REMOVE it PER ENV so each saved demo is exactly that env's own
+    # trajectory, terminated at its own last motion -- its length depends ONLY on itself. Each env keeps the frames
+    # of ITS phase(s) (``env_phases[e]``), trimmed/collapsed by ONE rule:
+    #   keep a frame iff it is near real ACTIVE-ARM motion (|delta arm joints| > ARM_EPS, the gate's own measure) OR
+    #   a real gripper TRANSITION (a close/open/release ramp). Drop the trailing pad past the last arm motion, and
+    #   collapse any interior arm-static + gripper-steady run (an inter-phase lifted pad, a home idle, a held/empty
+    #   grip the firm PD micro-jitters) to a short SETTLE -- so no static-arm run ever exceeds the gate. A gripper
+    #   transition is a NET move (a close shifts ~0.5 over its dwell); a hold only JITTERS about a mean, so we test a
+    #   WINDOWED net change (not a per-frame delta, which can't tell a slow ramp from jitter).
+    # The CLEAN (DISTURB=0) single-phase path keeps its trajectory verbatim (only the home tail trimmed) -> byte-
+    # identical; its designed double-``at`` dwell is preserved (it has no inter-phase pad to collapse).
+    # joint_position 14-D: [0:6]=L arm,[6]=L grip,[7:13]=R arm,[13]=R grip; take each env's ACTIVE arm + gripper.
+    ARM_EPS, GRIP_NET, GRIP_W, SETTLE = 1.5e-3, 0.05, 6, 4
+    arm_lo = np.where(side_is_left, 0, 7)                         # active-arm joint slice start, per env
+    grip_col = np.where(side_is_left, 6, 13)                      # active-gripper col, per env
+    dj = np.abs(np.diff(jpos, axis=1))                           # (N, Tr-1, 14) per-frame joint delta
+    gv = np.take_along_axis(jpos, grip_col[:, None, None], axis=2)[:, :, 0]   # (N, Tr) active-gripper value
+    single_phase = (env_phases is None)                         # the CLEAN path: one continuous trajectory, no pad
+    if env_phases is None:
+        env_phases = [[0] for _ in range(N)]
+    if not phase_bounds:
+        phase_bounds = [(0, Tr)]
+
+    def _trim_env(e):
+        """The GLOBAL recorded-frame indices env e keeps -- purely from env e's OWN recorded motion (independent of
+        every other env). Concatenate its phase frames, drop the trailing pad past its last arm motion, and collapse
+        any interior arm-static + gripper-steady run to a SETTLE. CLEAN single-phase: collapse nothing (one
+        continuous trajectory) -> just the tail trim (byte-identical)."""
+        seq = np.array([g for p in env_phases[e] for g in range(*phase_bounds[p])], int)
+        if len(seq) <= 1:
+            return seq
+        prev = np.clip(seq[1:] - 1, 0, dj.shape[1] - 1)         # the delta ARRIVING into seq[k] (k>=1)
+        arm_mv = np.concatenate([[True],                        # seq[0] always kept
+                                 dj[e, prev, arm_lo[e]:arm_lo[e] + 6].max(axis=1) > ARM_EPS])
+        fwd = np.clip(seq + GRIP_W, 0, Tr - 1)                  # a forward window on the active-gripper value
+        grip_mv = np.abs(gv[e, fwd] - gv[e, seq]) > GRIP_NET    # a real gripper TRANSITION (net move) at seq[k]
+        last = int(np.where(arm_mv[1:])[0][-1]) + 1 + 2 if arm_mv[1:].any() else len(seq) - 1   # last arm motion + settle
+        last = min(last, len(seq) - 1)
+        if single_phase:                                        # one trajectory: keep verbatim up to the home tail
+            return seq[:last + 1]
+        keep, k = [], 0
+        while k <= last:
+            if arm_mv[k] or grip_mv[k]:                         # near arm motion OR a gripper transition -> keep
+                keep.append(seq[k]); k += 1
+                continue
+            j = k                                               # a static run (arm still AND gripper steady)
+            while j <= last and not arm_mv[j] and not grip_mv[j]:
+                j += 1
+            keep.extend(seq[k:k + SETTLE].tolist())             # collapse the pad/hold to a short settle
+            k = j
+        return np.array(keep, int)
+
+    keep_idx = [_trim_env(e) for e in range(N)]
+    demo_len = np.array([len(k) for k in keep_idx], int)         # per-env recorded length (independent, variable)
     print(f"[COLLECT] per-env demo length (natural termination): min={int(demo_len.min())} "
-          f"max={int(demo_len.max())} mean={demo_len.mean():.0f} of Tr={Tr} recframes", flush=True)
+          f"max={int(demo_len.max())} mean={demo_len.mean():.0f} of Tr={Tr} recframes "
+          f"({'clean single-phase' if single_phase else 'read-based recovery'})", flush=True)
     vdir = os.path.join(data_dir, "videos")
     if not FAST:                                                  # FAST writes ONLY demos.hdf5 (no videos)
         for nm in ("cam_side", "cam_lw", "cam_rw"):
             os.makedirs(os.path.join(vdir, nm), exist_ok=True)
     with h5py.File(os.path.join(data_dir, "demos.hdf5"), "w") as f:
         for e in range(N):
-            Te = int(demo_len[e])                              # this env's natural length (trimmed at home)
+            ki = keep_idx[e]                                   # this env's kept GLOBAL frame indices (phase-aware)
+            Te = int(demo_len[e])                              # this env's natural length (trimmed, hold-free)
             d = f.create_group(f"data/demo_{e}")
-            d.create_dataset("actions", data=acts[e, :Te].astype(np.float32))
+            d.create_dataset("actions", data=acts[e, ki].astype(np.float32))
             sg = d.create_group("states/articulation/robot")
-            sg.create_dataset("joint_position", data=jpos[e, :Te].astype(np.float32))
-            sg.create_dataset("joint_velocity", data=jvel[e, :Te].astype(np.float32))
+            sg.create_dataset("joint_position", data=jpos[e, ki].astype(np.float32))
+            sg.create_dataset("joint_velocity", data=jvel[e, ki].astype(np.float32))
             pg = d.create_group("ee_pose")
-            pg.create_dataset("position", data=eepos[e, :Te].astype(np.float32))
-            pg.create_dataset("orientation", data=eequat[e, :Te].astype(np.float32))
+            pg.create_dataset("position", data=eepos[e, ki].astype(np.float32))
+            pg.create_dataset("orientation", data=eequat[e, ki].astype(np.float32))
             d.attrs["num_samples"] = Te; d.attrs["success"] = bool(placed[e]); d.attrs["seed"] = int(seed)
             d.attrs["arm"] = "left" if side_is_left[e] else "right"
             # PENETRATION GATE attrs (owner #1): worst-ever solid-solid interpenetration (mm) + the abnormal
@@ -1192,13 +1133,12 @@ def collect(N, seed, data_dir, out_dir, target=None):
             d.attrs["hdr"] = os.path.basename(stage.hdrs[e])
             d.attrs["has_distractors"] = bool(has_dist[e])     # 50/50 per-env: was this a cluttered trial?
             d.attrs["distractors"] = ",".join(dist_names) if has_dist[e] else ""
-            # DISTURBANCE attrs (this feature, v2): ``disturbed`` = the cube was gently shoved at a RANDOM time
-            # during the grasp approach (per-env probability, like the 50/50 distractors). ``disturb_phase`` =
-            # whether the solver was informed "before_close" (-> chase) or "after_close" (-> fail+retry).
-            # ``disturb_outcome`` in {"chased","recovered","failed","none"} (see summary above): "chased" is the
-            # moving-object-chase signal, "recovered" is the failure->recover signal. ``recovery_attempts`` =
-            # how many extra re-grasps the god-mode solver needed (0 for a clean chase). ``recovered`` (legacy)
-            # = disturbed AND ended cleanly placed (chased OR recovered).
+            # DISTURBANCE attrs: ``disturbed`` = the cube was shoved at a RANDOM time during the grasp approach
+            # (per-env probability, like the 50/50 distractors). ``disturb_phase`` = whether the solver was
+            # informed "before_close" (-> chase) or "after_close". ``disturb_outcome`` in {"chased","grasped_thru",
+            # "recovered","failed","none"} (see summary above). ``recovery_attempts`` = re-grasps the god-mode
+            # solver needed (1 for a chase or an after-close miss; 0 for a grasped-through success). ``recovered``
+            # (legacy) = disturbed AND ended cleanly placed.
             d.attrs["disturbed"] = bool(disturbed[e])
             d.attrs["disturb_phase"] = str(disturb_phase[e])
             d.attrs["disturb_outcome"] = str(disturb_outcome[e])
@@ -1219,9 +1159,9 @@ def collect(N, seed, data_dir, out_dir, target=None):
             d.attrs["dr_pose_scale"] = _dr_scale("DR_POSE_SCALE")
             d.attrs["dr_mass_scale"] = _dr_scale("DR_MASS_SCALE")
             d.attrs["dr_fric_scale"] = _dr_scale("DR_FRIC_SCALE")
-            if not FAST:                                        # the sensor-only policy stream (trimmed to Te)
+            if not FAST:                                        # the sensor-only policy stream (kept frames only)
                 for nm in ("cam_side", "cam_lw", "cam_rw"):
-                    vid = np.stack([cam_steps[nm][t][e] for t in range(Te)])
+                    vid = np.stack([cam_steps[nm][t][e] for t in ki])
                     iio.imwrite(os.path.join(vdir, nm, f"demo_{e}.mp4"), vid, fps=12, codec="libx264")
     # FAST: skip ALL video/tile/montage/preview writing entirely (the per-cam demo mp4s above, the third-person
     # tile, the fourview clips, the distractor preview PNGs) -- FAST writes ONLY demos.hdf5 + the [COLLECT] prints
@@ -1234,7 +1174,7 @@ def collect(N, seed, data_dir, out_dir, target=None):
         lab = {"third": "third", "cam_side": "side", "cam_lw": "wrist-L", "cam_rw": "wrist-R"}
         for e in chosen:
             frames = []
-            for t in range(Tr):
+            for t in keep_idx[e]:                              # the env's OWN kept frames (phase-aware, hold-free)
                 q = {nm: _label(cam_steps[nm][t][e], lab[nm]) for nm in lab}
                 frames.append(np.vstack([np.hstack([q["third"], q["cam_side"]]),
                                          np.hstack([q["cam_lw"], q["cam_rw"]])]))

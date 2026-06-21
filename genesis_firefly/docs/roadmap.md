@@ -43,6 +43,27 @@ phase lands. Requirements live in [project_overview.md](project_overview.md) (bl
   gets the verified collision + recognizable-texture behaviour with no copy-paste fork. *(built — see progress log)*
 
 ## Progress log
+- **2026-06-21 — Disturbance extracted (modularity 3/3) + RECOVERY made god-mode READ-BASED + GENERAL + HOLD-FREE.**
+  Moved the disturbed-trajectory ASSEMBLY out of `collect()` into `skills/disturbance.py` (de-closured over a small
+  `DisturbExec` context, mirroring `GraspContext`): `build_phase1` / `build_phase2` (the per-env trajectory builders),
+  `select_recovery_grasp` + `recovery_grasp_quat` (the god-mode grasp), `regrasp_wps`, `grasp_succeeded`,
+  `fire_steps_from_plan`. `tasks/pickplace.py`'s disturbed branch is now a thin orchestrator (build context → phase 1
+  → god-mode read → phase 2). The CLEAN `DISTURB=0` `pick_wps+place_tail` path stays in the task, byte-identical
+  (cube 8/8 · T=977 · lengths identical to HEAD; objects clean-path unchanged). **The recovery-accuracy fix
+  (owner-flagged):** the old path predicted the shoved xy and re-grasped at the cube's ORIGINAL yaw → the retry
+  missed the rotated cube. Now the recovery is **god-mode read-based** on the owner's simple logic: informed BEFORE
+  the close → don't close, read the cube's ground-truth pose + grasp there; informed AFTER → if the attempt still
+  caught the cube (the "+8 cm" was a SUCCESS, the close caught it + lifted it) keep going + place it, else reopen +
+  rise + read + re-grasp. Every re-grasp reads the cube's **full 6-DOF** ground-truth pose and builds the grasp from
+  the object's reference axis (long-axis / face / roll-snapped) rotated by the actual quat — so it HITS the object
+  however the (UNCONSTRAINED) shove relocated/rotated/tumbled it; **general over objects**, not cube-only. An
+  off-table / out-of-reach shove is detected from the read and routed straight home (a labelled FAILURE, not a NaN).
+  **Hold-free at the root:** every disturbed env runs its own pick-to-lift then continues to place/recover; the
+  per-env trim drops all padding so each saved demo's length depends ONLY on itself (no env waits). Verified DUAL
+  gate (cube, `DISTURB=0.5` N=16, seeds 7 & 23): **16/16 (or 15/16) placed, recovered>0, NO-HOLD worst = 6 frames**,
+  0 abnormal penetration. See `docs/disturbance_recovery.md`. *(Known boundary: very thin (pen) / rolling (ball)
+  targets under a strong unconstrained shove reach poses that are unrecoverable or trigger the object's own firm-
+  grasp fragility — a per-object grasp-robustness follow-up, separate from this pass; the cube is fully robust.)*
 - **2026-06-21 — Grasp ORIENTATION / WRIST-MARGIN planning extracted (agent-native modularity 2/3).** Moved the
   per-env grasp/carry quat builders + the RoboLab-faithful relax-tilt selection OUT of `collect()` (where they were
   CLOSURES over its locals) into `skills/grasp.py` as PURE functions: `grasp_quat_at`, `cquat`, `select_grasp_tilt`
