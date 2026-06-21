@@ -87,22 +87,16 @@ def _rho_for(spec, mass=None):
     return float(m / max(vol, 1e-6))
 
 
+# ``build_object`` now lives in the ONE shared object builder ``world/object_factory.py`` (consolidated so there
+# is a SINGLE spec->sim-entity path for every task — collision + visual + native texture). Re-exported here for
+# back-compat: any historical ``from world.firefly_scene import build_object`` keeps working unchanged.
 def build_object(scene, spec, pos_xy, table_top_z, mass=None):
-    """Spawn one graspable object from its ObjectSpec (source = usd | cuboid | sphere), resting on the table."""
-    x, y = pos_xy
-    z = spec.rest_root_z(table_top_z)
-    mat = gs.materials.Rigid(rho=_rho_for(spec, mass), friction=float(spec.friction[0]))
-    if spec.source == "cuboid":
-        morph = gs.morphs.Box(size=tuple(spec.scaled_extents()), pos=(x, y, z))
-        surf = gs.surfaces.Plastic(color=spec.color, roughness=0.6)
-    elif spec.source == "sphere":
-        morph = gs.morphs.Sphere(radius=float(spec.scaled_extents()[0] / 2), pos=(x, y, z))
-        surf = gs.surfaces.Rough(color=spec.color)
-    else:
-        morph = gs.morphs.USD(file=str(OBJECTS / spec.usd_subpath), pos=(x, y, z),
-                              scale=spec.scale, convexify=True)
-        surf = None
-    return scene.add_entity(morph, material=mat, surface=surf)
+    """Spawn one graspable object from its ObjectSpec (source = usd | cuboid | sphere), resting on the table.
+
+    Thin shim -> ``world.object_factory.build_object`` (the consolidated single object-building path). Imported
+    lazily to avoid a circular import (object_factory imports OBJECTS/_rho_for from this module)."""
+    from world.object_factory import build_object as _build_object
+    return _build_object(scene, spec, pos_xy, table_top_z, mass=mass)
 
 
 def build_bowl(scene, bowl_xy, table_top_z, scale=1.0, surface=None):

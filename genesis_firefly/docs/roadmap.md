@@ -30,8 +30,24 @@ phase lands. Requirements live in [project_overview.md](project_overview.md) (bl
   from the solver contact buffer (`max_penetration` / `abnormal_penetration` / `PenetrationTracker`); the owner
   #1 collision gate that rejects any demo with abnormal penetration. *(built — see §3g + progress log)*
 - (more: grasp primitives, collision-free planning around distractors.)
+- **Object factory** (`world/object_factory.py`) — the ONE shared spec→sim-entity builder (collision + visual +
+  native texture): `spawn_target` / `spawn_distractors` / `build_object` / `target_color`. Any task imports it and
+  gets the verified collision + recognizable-texture behaviour with no copy-paste fork. *(built — see progress log)*
 
 ## Progress log
+- **2026-06-21 — Object factory extracted (agent-native modularity).** Moved the OBJECT SPAWN + TEXTURE concern
+  out of `tasks/pickplace.py` into a NEW shared `world/object_factory.py` (`spawn_target`, `spawn_distractors`,
+  `_spawn_distractor_entity`, `target_color`, `_target_usd_surface`) and consolidated the orphaned
+  `firefly_scene.build_object` into it (ONE object-building path; `firefly_scene.build_object` is now a back-compat
+  shim). pickplace.py imports it as `obj_factory` (NOT `objf` — that name is a local var in `collect()` for the
+  object's final pos) and passes its OWN layout-specific distractor *placement* samplers
+  (`choose_distractor_types`/`sample_distractor_poses`) into `spawn_distractors`. **Pure STRUCTURE move — function
+  bodies byte-identical** (verified by AST diff). Byte-identical gate (FAST, DISTURB=0, seed7) vs committed HEAD:
+  cube N=8 → 8/8 grasp+place, T=977, 0 abnormal pen; apple/banana/tennis/pen N=12 → grasp/place rates match HEAD
+  (apple 12/12, banana 12/12, pen 12/12, tennis 11–12/12), distractors 100% collision-free. The only deltas are
+  single-env boundary flips on the two objects that ride the 7 mm penetration gate (banana env4 6.9↔7.0 mm,
+  tennis 1 env) — GPU solver float nondeterminism at the gate edge, NOT a behaviour change (the spawn args + RNG
+  order are bit-identical).
 - **2026-06-17/18 — B0–B8 reproduction.** Dual Firefly Y6 + GR100 imported to Genesis (interleaved dofs, MIT
   gains, ARMATURE=0.01, implicitfast integrator → wrist jitter gone). Good-mode collision (convex-DECOMPOSE
   robot @0.05 + bowl @0.04, firm Newton, self-collision). Pure-friction grasp (substeps=4, 3mm finger contact

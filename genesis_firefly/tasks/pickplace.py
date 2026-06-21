@@ -35,7 +35,7 @@ from skills.executor import BatchExecutor  # the ONE smooth motion path (densify
 from skills.penetration import PenetrationTracker, ABNORMAL_THRESH_M  # the #1 collision gate  # noqa: E402
 from skills.disturbance import DisturbanceSpec  # gentle target-shove harness -> failure-recovery data  # noqa: E402
 from registry.object_spec import REGISTRY  # noqa: E402
-from world.firefly_scene import OBJECTS, _rho_for  # asset root + spec->density helper  # noqa: E402
+import world.object_factory as obj_factory  # the ONE shared spec->sim-entity builder (collision+visual+texture); aliased NOT ``objf`` (a local var below)  # noqa: E402
 import imageio.v3 as iio  # noqa: E402
 import cv2  # noqa: E402
 import h5py  # noqa: E402
@@ -303,130 +303,13 @@ def sample_distractor_poses(N, specs, dr, rng, lay):
     return out_xy, out_yaw
 
 
-def _spawn_distractor_entity(scene, spec, pos_xy, z):
-    """Spawn ONE distractor as a real collidable rigid body, but with a NYX-SAFE visual. cuboid/sphere are
-    procedural (Nyx-safe already); USD-sourced objects (apple/banana/pen) render via their extracted clean
-    .obj mesh + a realistic flat colour (Nyx SEGFAULTS on the textured USD material binding, the same reason
-    the bowl uses bowl_clean.obj). Collision fidelity (convex decomposition) is identical to the grasp path."""
-    x, y = pos_xy
-    # distractors only need to REST (not be grasped), so use firm friction so they sit put under a graze.
-    mat = gs.materials.Rigid(rho=_rho_for(spec), friction=max(1.1, float(spec.friction[0])))
-    if spec.source == "cuboid":
-        return scene.add_entity(gs.morphs.Box(size=tuple(spec.scaled_extents()), pos=(x, y, z)),
-                                material=mat, surface=gs.surfaces.Plastic(color=spec.color, roughness=0.6))
-    if spec.source == "sphere":
-        return scene.add_entity(gs.morphs.Sphere(radius=float(spec.scaled_extents()[0] / 2), pos=(x, y, z)),
-                                material=mat, surface=gs.surfaces.Rough(color=spec.color))
-    # USD object -> Nyx-safe clean mesh + flat realistic colour. Collision = a SINGLE convex hull (no
-    # decomposition): a distractor is never grasped, so it doesn't need a faithful concave collider, and a hull
-    # gives a FLATTER, stable resting base -> a curved banana doesn't slowly roll/creep off a rounded decomposed
-    # facet (that intrinsic creep, not the arm, was reading as a 2-3cm "knock" in the displacement metric).
-    col = spec.dist_color or spec.color
-    return scene.add_entity(
-        gs.morphs.Mesh(file=str(OBJECTS / spec.mesh_subpath), pos=(x, y, z), scale=spec.scale, convexify=True),
-        material=mat, surface=gs.surfaces.Plastic(color=col, roughness=0.5))
-
-
-def target_color(spec, free_color, rng):
-    """The GRASP TARGET's render colour (DR-strategist-owned per-object COLOUR POLICY; see the colour-policy table
-    in .claude/workbooks/dr_workbook.md). Three classes:
-      * NATIVE TEXTURE (apple): the spec declares ``native_texture`` -> the object renders its OWN UV-mapped skin
-        in spawn_target, so the flat colour here is unused (NO colour DR). We return a FIXED palette base (no
-        jitter) purely as the NATIVE_TEX=0 fallback colour -- the texture is the real colour.
-      * REALISTIC PALETTE with colour-DR (banana/pen): pick ONE palette entry + a SMALL per-channel jitter
-        (+/-0.04) for natural variation (banana yellow/green not pink; pen black/blue/red).
-      * FIXED colour, no DR (tennis_ball): a single-entry palette stays its one true regulation colour (the
-        +/-0.04 jitter on one entry is negligible -> effectively fixed).
-      * FREE random (cube): no palette -> the task's FREE distinct-from-table colour (cube byte-for-byte).
-    This is the FIX for the bug where the cube's free random colour was applied to EVERY target (the PINK banana)."""
-    pal = getattr(spec, "target_palette", None)
-    if not pal:
-        return free_color                                       # cube: keep the free random distinct colour
-    if getattr(spec, "native_texture", None):                   # native-texture object: fixed fallback, NO DR
-        return tuple(np.asarray(pal[0], float).tolist())        # (texture wins in spawn_target; colour unused)
-    base = np.asarray(pal[int(rng.randint(len(pal)))], float)
-    jit = (rng.rand(3) - 0.5) * 0.08                            # +/-0.04 per channel -> subtle natural variation
-    return tuple(np.clip(base + jit, 0.0, 1.0).tolist())
-
-
-def _target_usd_surface(spec, color):
-    """The GRASP-TARGET visual surface for a USD-sourced object. NATIVE TEXTURE (DR-strategist colour policy):
-    if the spec declares a ``native_texture`` (a UV-mapped diffuse image, e.g. the apple's apple_02.png) AND the
-    object's clean .obj actually carries UVs, render the object's OWN photoreal skin via gs.textures.ImageTexture
-    -- the SAME idiom the table tops use (verified in Nyx, no segfault). This makes the apple a realistic textured
-    apple instead of a flat pink blob. Otherwise (banana/pen clean.obj have NO UVs; the cube/sphere don't reach
-    here) fall back to the realistic flat ``color`` from the per-object palette. NATIVE_TEX=0 forces the flat
-    fallback (ablation)."""
-    use_tex = bool(getattr(spec, "native_texture", None)) and os.environ.get("NATIVE_TEX", "1") != "0"
-    if use_tex:
-        tex_path = OBJECTS / spec.native_texture
-        return gs.surfaces.Plastic(
-            diffuse_texture=gs.textures.ImageTexture(image_path=str(tex_path)), roughness=0.5)
-    return gs.surfaces.Plastic(color=color, roughness=0.5)
-
-
-def spawn_target(scene, spec, color, pos_xy=(0.40, 0.18), z=0.30):
-    """Spawn the GRASP TARGET as a real collidable rigid body with a FAITHFUL grasp collider + a Nyx-safe visual.
-    The target is the one object that gets GRASPED, so (unlike a distractor) its USD-mesh collider is a convex
-    DECOMPOSITION (coacd, the same recipe as the bowl), not a single hull, so the gripper closes on the real
-    elongated/flat shape (a banana's curve, a pen's thin body, a book's flat slab) rather than a fat envelope.
-    Procedural cube/sphere keep their exact box/sphere collider (already faithful). The visual is the procedural
-    box/sphere for those sources, or the Nyx-safe clean .obj for USD sources (the textured USD segfaults Nyx, the
-    same reason the bowl + distractors render from clean meshes). VISUAL COLOUR: a USD target with a declared
-    NATIVE TEXTURE (the apple) renders its OWN UV-mapped skin (apple_02.png) via _target_usd_surface; otherwise
-    ``color`` (the per-object realistic palette) is used so the target stays visible against the randomized table.
-    Returns the entity (its per-env pose/yaw/mass DR is applied by the caller after build, exactly as the cube)."""
-    x, y = pos_xy
-    fr = float(os.environ.get("TGT_FRIC", spec.friction[0]))   # higher friction -> a shallower grip still holds
-    mat = gs.materials.Rigid(rho=_rho_for(spec), friction=fr)
-    if spec.source == "cuboid":
-        # EXACT cube path (byte-for-byte for the regression): procedural box, plastic PBR, the spec's grasp friction.
-        return scene.add_entity(gs.morphs.Box(size=tuple(spec.scaled_extents()), pos=(x, y, z)),
-                                material=gs.materials.Rigid(rho=600.0, friction=1.0),
-                                surface=gs.surfaces.Plastic(color=color, roughness=0.35))
-    if spec.source == "sphere":
-        return scene.add_entity(gs.morphs.Sphere(radius=float(spec.scaled_extents()[0] / 2), pos=(x, y, z)),
-                                material=mat, surface=gs.surfaces.Rough(color=color))
-    # USD object -> grasp collider on the clean mesh + the distinct-from-table colour.
-    # COLLIDER CHOICE (spec.grasp_single_hull):
-    #  * decomposition (default): coacd splits the mesh into solid hulls -> faithful concave shape (needed for a
-    #    hollow/handled object). But for a ROUNDED CONVEX body (banana) the decomposition's internal hull seams +
-    #    the firm high-kp pinch drive the claw DEEP into a seam -> >9mm penetration AND huge constraint forces
-    #    that NaN the Newton solver (verified: dz<=-0.005 banana -> 'Invalid constraint forces' crash).
-    #  * single convex hull (grasp_single_hull=True): a SMOOTH convex envelope of the body. A banana is already
-    #    near-convex, so the hull is a faithful smooth banana the claws pinch CLEANLY -- stable contact, shallow
-    #    penetration, no NaN. This is the SAME stable single-hull collider the distractors use, promoted to the
-    #    grasp target for convex rounded objects.
-    single = os.environ.get("TGT_SINGLE_HULL")
-    single = (single == "1") if single is not None else bool(getattr(spec, "grasp_single_hull", False))
-    if single:
-        return scene.add_entity(
-            gs.morphs.Mesh(file=str(OBJECTS / spec.mesh_subpath), pos=(x, y, z), scale=spec.scale, convexify=True),
-            material=mat, surface=_target_usd_surface(spec, color))
-    decomp = float(os.environ.get("TGT_DECOMP", getattr(spec, "grasp_decompose_err", 0.04)))
-    return scene.add_entity(
-        gs.morphs.Mesh(file=str(OBJECTS / spec.mesh_subpath), pos=(x, y, z), scale=spec.scale,
-                       convexify=True, decompose_object_error_threshold=decomp, decimate=False),
-        material=mat, surface=_target_usd_surface(spec, color))
-
-
-def spawn_distractors(stage, dr, rng, target="cube"):
-    """Create the per-build distractor ENTITIES (called before stage.build()) and return (entities, names,
-    xy, yaw). TYPES are per-build (chosen here with the stage rng, EXCLUDING the target type); POSES are per-env
-    (placed after build via the returned batched arrays). Each entity is a real collidable rigid body from the
-    REGISTRY (realistic colour/size/mass/friction) and drops+settles with the target/bowl during the settle."""
-    names = choose_distractor_types(rng, target=target)
-    specs = [REGISTRY[nm] for nm in names]
-    lay = stage.lay
-    ents = []
-    for spec in specs:
-        # parked off to the far corner at build; the real per-env pose is set after build() (set_pos overrides).
-        e = _spawn_distractor_entity(stage.scene, spec,
-                                     pos_xy=(lay.seam_x + lay.object_table_depth - 0.05, 0.0),
-                                     z=spec.rest_root_z(lay.object_table_height))
-        ents.append(e)
-    xy, yaw = sample_distractor_poses(stage.n_envs, specs, dr, rng, lay)
-    return ents, names, xy, yaw
+# OBJECT SPAWN + TEXTURE (the grasp target, the distractor entities, the native-texture surfaces) lives in the
+# ONE shared builder ``world/object_factory.py`` (agent-native modularity: objects are standalone + reusable
+# across tasks). This task imports it as ``obj_factory`` (NOT ``objf`` -- that name is a local var in collect()
+# for the object's final pos) and supplies its OWN layout-specific distractor samplers (``choose_distractor_types``
+# + ``sample_distractor_poses``, the corridor-aware placement above) to ``obj_factory.spawn_distractors``. The
+# object-construction concern (collision + visual + texture) is NOT duplicated here --
+# ``obj_factory.spawn_target`` / ``obj_factory.spawn_distractors`` are called from ``collect()``.
 
 
 def _label(img, text):
@@ -470,9 +353,9 @@ def collect(N, seed, data_dir, out_dir, target=None):
     # (target_palette=None) so it keeps its free random colour -> the cube collection stays byte-for-byte. The
     # bowl always uses a free distinct colour (it is a container, not a realistically-coloured object).
     ch, cube_col = stage.distinct_object_color()                 # the cube's free random colour (+ a hue to avoid)
-    tgt_col = target_color(spec, cube_col, stage.rng)            # realistic palette colour (cube -> cube_col)
+    tgt_col = obj_factory.target_color(spec, cube_col, stage.rng)   # realistic palette colour (cube -> cube_col)
     _, bowl_col = stage.distinct_object_color(ch)
-    cube = spawn_target(stage.scene, spec, tgt_col, pos_xy=(0.40, 0.18), z=0.30)   # the TARGET entity
+    cube = obj_factory.spawn_target(stage.scene, spec, tgt_col, pos_xy=(0.40, 0.18), z=0.30)   # the TARGET entity
     bowl = stage.scene.add_entity(gs.morphs.Mesh(file=BOWL_OBJ, convexify=True,
                                   decompose_object_error_threshold=0.04, decimate=False),
                                   material=gs.materials.Rigid(rho=400.0, friction=1.0),
@@ -481,7 +364,8 @@ def collect(N, seed, data_dir, out_dir, target=None):
     # --- distractor / clutter objects (REQUIRED DR): 2-3 random irrelevant objects on the OBJECT table, in OPEN
     # areas, rejection-sampled OUT of the active arm's swept corridor (grasp + cube->bowl carry + bowl->home).
     # ENTITIES are created here (per-build types); their per-env POSES are applied after build() below. ---
-    dist_ents, dist_names, dist_xy, dist_yaw = spawn_distractors(stage, dr, rng, target=target)
+    dist_ents, dist_names, dist_xy, dist_yaw = obj_factory.spawn_distractors(
+        stage, dr, rng, choose_distractor_types, sample_distractor_poses, target=target)
     dist_specs = [REGISTRY[nm] for nm in dist_names]
     print(f"[COLLECT] distractors (per-build, K={len(dist_names)}): {dist_names}", flush=True)
 

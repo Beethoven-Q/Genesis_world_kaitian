@@ -145,6 +145,12 @@ The main agent never re-derives infrastructure; it *calls* harnesses:
   renderer, per-env immersive HDRI background + light, and the parallel build. Methods: `.build()`,
   `.settle_home()`, `.render()`. The task just adds its objects and reads cameras. **"Set up the scene/robot/
   cameras/rendering/IK correctly" is a solved, reused call — not per-task work.**
+- **Object factory** (`world/object_factory.py`): the ONE shared place that builds any `ObjectSpec` into a sim
+  entity — collision (faithful convex decomposition or single hull) + visual + native UV texture — for **every**
+  task. A task calls `spawn_target(...)` (the grasp target) / `spawn_distractors(...)` (clutter) / `build_object(...)`
+  and gets the SAME verified collision + recognizable-texture behaviour with no copy-paste fork. (Object SPAWN +
+  TEXTURE was extracted out of `tasks/pickplace.py` here so objects are standalone + reusable; the task keeps only
+  its layout-specific distractor *placement* samplers, which it passes into `spawn_distractors`.)
 - **Full-DR harness** (`dr/`, + the DR subagent): encodes the *complete* DR spec once and applies it. See §4.
 - **Dexterity-aware IK** (`robots/ik.py` + `skills/pick_place.py`): Genesis-native sub-mm IK targeting the tool
   frame, wrapped by `reachable_grasp_quat`/`reachable_place_quat` (prefer top-down, relax to the smallest tilt
