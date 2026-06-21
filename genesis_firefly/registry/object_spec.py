@@ -31,6 +31,17 @@ class ObjectSpec:
     #                                  for rendering distractors (Nyx SEGFAULTS on the textured USD material bind)
     dist_color: tuple | None = None  # realistic flat colour for the clean-mesh distractor render (USD texture is
     #                                  lost when extracting the OBJ); None -> fall back to `color`
+    native_texture: str | None = None  # UV-mapped DIFFUSE-TEXTURE image (under assets/objects/) for the GRASP-
+    #                                  TARGET render -- the object's OWN photoreal skin, used INSTEAD of a flat
+    #                                  target_palette colour. Set ONLY when the clean .obj carries usable UVs AND
+    #                                  the texture renders in Nyx (apple_clean.obj has full UVs -> apple_02.png; a
+    #                                  YCB clean.obj with NO `vt` -- banana/pen -- can't map a texture, so it keeps
+    #                                  the realistic palette). When set, the target renders with this image
+    #                                  (gs.textures.ImageTexture, the same idiom the table tops use) and gets NO
+    #                                  per-frame colour DR (the texture IS the colour). DR-STRATEGIST-OWNED policy
+    #                                  (.claude/agents/dr-strategist.md + .claude/workbooks/dr_workbook.md): the
+    #                                  per-object NATIVE-TEXTURE / REALISTIC-PALETTE / FIXED-colour classification
+    #                                  is the DR strategist's responsibility (see the colour-policy table there).
     scale: float = 1.0
     elongated: bool = False         # True -> close ACROSS the long axis (banana/pen)
     is_cube: bool = False           # True -> orientation-aware face-pair grasp
@@ -121,12 +132,20 @@ REGISTRY: dict[str, ObjectSpec] = {
     # apple (round, ~7.3cm). Grasps at its CENTRE with the cube's top-down(+relax-tilt) path -- no special
     # depth/tilt needed once the friction cone is tight (noslip_iterations in firm_rigid_options; before that a
     # firm pinch ejected the curved body, the 2026-06-20 round-object bug).
+    # COLOUR POLICY = NATIVE TEXTURE (DR-strategist-owned, see dr_workbook colour-policy table): the apple has its
+    # OWN photoreal skin -- apple_clean.obj is fully UV-mapped (898 vt, all faces) to objaverse/textures/apple_02.png
+    # (a 1024x1024 real apple texture, natural red mottling + stem). The collector renders it with that texture
+    # (gs.textures.ImageTexture, the table-top idiom -- verified in Nyx, no segfault) instead of a flat colour, so
+    # the apple reads as a REAL apple, not a flat pink blob. NO per-frame colour DR (the texture IS the colour).
+    # target_palette is kept as a FALLBACK only (used if native_texture is unset/forced off via NATIVE_TEX=0).
+    # grasp_dz=-0.006 seats the body a touch deeper in the curved GR100 claws (more stable cage; still 0 abnormal).
     "apple": ObjectSpec(
         name="apple", language_name="apple", source="usd", usd_subpath="objaverse/apple_02.usd",
         mesh_subpath="objaverse/apple_clean.obj", dist_color=(0.80, 0.12, 0.10),
+        native_texture="objaverse/textures/apple_02.png", grasp_dz=-0.006,
         mass=0.050, extents=(0.0702, 0.0754, 0.0733), local_center=(0.0, 0.0, 0.0),
         elongated=False, x_range=(0.34, 0.44), place_xy_tol_cm=7.0,
-        target_palette=((0.62, 0.06, 0.05), (0.74, 0.10, 0.07), (0.40, 0.58, 0.14))),  # deep red x2 / green (unripe)
+        target_palette=((0.62, 0.06, 0.05), (0.74, 0.10, 0.07), (0.40, 0.58, 0.14))),  # FALLBACK: deep red x2 / green
     # banana: CURVED. The AABB centre sits in the HOLLOW of the curve (~3cm off the fruit), so a grasp at the
     # AABB centre closes on AIR. grasp_center_offset_local shifts the grasp point along the SHORT (closing) axis
     # onto the banana body (short-proj +0.030 m = the body's centre at the long-axis midpoint, MEASURED from the
@@ -149,12 +168,24 @@ REGISTRY: dict[str, ObjectSpec] = {
     # the hull drops it to 1/12 and 12/12 physical placed). The thin pen still needs the tight friction cone
     # (noslip) to hold at all -- WITHOUT it the firm pinch slips and 0/12 grasp. release_dz lower so it settles in
     # the bowl instead of rolling off the rim.
+    # DEEPER-GRASP TUNE (2026-06-20, owner #6): the firm pad-near-pad clamp on the THIN ~2cm pen body over-bit
+    # it (verified E=24 stock seed7: 4/24 abnormal @ up to 8.1mm). A SMALL deeper seat (grasp_dz -0.004, cradle a
+    # touch lower in the curved claws) COMBINED with a GENTLER firm-close TARGET (grasp_close 0.9 -> 0.80) seats
+    # the pen more stably AND stops the high-kp PD from driving the pad through the thin body: E=24 seed7 ->
+    # 24/24 placed, 0/24 abnormal, max 6.7mm (under the 7mm gate). The deeper seat ALONE (at the full 0.9 close)
+    # made penetration WORSE (drives further in); the gentler close is what lets the slight deeper seat cage
+    # without over-penetrating. grasp_close stays >= GR100_MEET(0.58) so the empty-close miss detector is valid.
+    # grasp_close=0.78 is the sweet spot (E=24 seed7: 0/24 abnormal, max 6.5mm; 24/24 grasped); LOWER (<=0.76)
+    # is non-monotonically WORSE (the gentle target lets the body shift into a deeper bite). The pen is the
+    # framework's hardest penetration case (a thin body the firm pad-near-pad clamp wants to over-bite), so it
+    # rides near the 7mm gate -- at E=12 the odd far-reach env can still nick ~7.3mm (1/12). Lower-risk than a
+    # deeper seat at the full close, which over-bit it (4/24 abnormal).
     "pen": ObjectSpec(
         name="pen", language_name="pen", source="usd", usd_subpath="ycb/dry_erase_marker.usd",
         mesh_subpath="ycb/dry_erase_marker_clean.obj", dist_color=(0.10, 0.10, 0.12),
         mass=0.020, extents=(0.0210, 0.1208, 0.0189), local_center=(0.0, 0.0, 0.0),
-        elongated=True, local_long_axis=(-0.0303, 0.9995, 0.0), grasp_dz=0.0, grasp_single_hull=True,
-        rest_offset=0.004, release_dz=0.03, x_range=(0.34, 0.44), place_xy_tol_cm=9.0,
+        elongated=True, local_long_axis=(-0.0303, 0.9995, 0.0), grasp_dz=-0.004, grasp_single_hull=True,
+        grasp_close=0.78, rest_offset=0.004, release_dz=0.03, x_range=(0.34, 0.44), place_xy_tol_cm=9.0,
         target_palette=((0.10, 0.10, 0.12), (0.12, 0.20, 0.55), (0.55, 0.12, 0.14))),  # black / blue / red marker
     "cube": ObjectSpec(
         name="cube", language_name="cube", source="cuboid", mass=0.040,

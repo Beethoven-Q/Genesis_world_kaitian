@@ -432,3 +432,34 @@ agent-native; subagents for context; rigorous, no hallucination.
   don't bury them. *Known follow-up:* DISTURB>0 recovery re-grasps reuse the planned tilt (2/8 briefly touch the
   wrist limit at the shoved pose) — opt-in hard-recovery path, re-select the tilt at the shoved pose to close it.
   Commit `b42bb96`. Next: re-collect 200 clean full-DR cube (parallel) + redo disturbance, then apple/banana/pen/tennis.
+
+- **2026-06-20 — three object improvements on the natural-motion foundation (apple native texture · DR-strategist
+  owns the colour policy · deeper grasp).** All on the correct relax-tilt + noslip + LIFT=0.10 foundation;
+  re-verified by REAL renders (DISTURB=0, seed 7); the CUBE regression held.
+  1. **Apple NATIVE TEXTURE (Task #4).** The apple rendered a flat pink-red because its `target_palette` overrode
+     its real skin. `apple_clean.obj` is fully UV-mapped (898 `vt`, all 1558 faces) to
+     `assets/objects/objaverse/textures/apple_02.png` (1024² real apple texture). FIX: a new `ObjectSpec.native_texture`
+     field + `tasks/pickplace.py::_target_usd_surface` render the target's OWN UV-mapped skin via
+     `gs.textures.ImageTexture` (the table-top idiom) — verified to render in Nyx with NO segfault (probe
+     `scripts/grasp/temp/apple_texture_probe.py`). The apple now reads as a real textured apple (natural red
+     mottling + stem), not a flat blob (proof: `output/temp/objimprove/apple_tex_real/PROOF_apple_native_texture_frame.png`).
+     Per-object decision: **apple=native texture; banana/pen=realistic palette** (their clean .obj have 0 `vt` — no
+     UVs — so a texture can't map onto the Nyx-safe mesh; owner already liked the banana yellow); **tennis=fixed**
+     regulation yellow-green; **cube=free random**.
+  2. **DR-strategist OWNS the per-object colour policy (Task #5).** `.claude/agents/dr-strategist.md` gains a
+     "Per-object colour/texture policy" contract section (classify each object NATIVE-TEXTURE / REALISTIC-PALETTE /
+     FIXED / FREE; probe a candidate texture's UVs + Nyx render before recommending NATIVE) and
+     `.claude/workbooks/dr_workbook.md` gains a per-object colour-policy TABLE + rationale + a dated log entry.
+     `registry/object_spec.py` carries a comment that the DR-strategist owns the `native_texture`/`target_palette`/
+     `color` fields. Future objects get classified by the DR subagent.
+  3. **Deeper grasp (Task #6) — collision-#1 stays 0 abnormal.** apple `grasp_dz 0→-0.006` (cradles lower in the
+     curved GR100 claws; peak pen DROPPED 5.9→4.4mm). pen `grasp_dz 0→-0.004` + `grasp_close 0.9→0.78`: the thin
+     ~2cm pen's firm pad-near-pad clamp over-bit it — E=24 stock **4/24 abnormal @8.1mm → 0/24 @6.5mm**; E=12 real
+     **12/12 placed, 0 abnormal, max 6.9mm** (was 10/12 clean, 2 over @7.6mm). A deeper seat at the FULL close made
+     the pen WORSE (drives further in); the gentler close lets the slight deeper seat cage without over-bite.
+     `grasp_close` is non-monotonic (≤0.76 WORSE). tennis/banana deeper seats REGRESSED (tennis place 11/12,
+     banana 2/12 over-pen) → kept at their stock seat (already 12/12 @ ~6.5mm). The pen is logged as the framework's
+     hardest penetration corner (rides the 7mm gate). **Re-verified (real render, E=12 seed7):** apple 12/12
+     (4.4mm) · tennis 12/12 (6.4mm) · banana 12/12 (6.7mm) · pen 12/12 (6.9mm) — all 0 abnormal, natural posture.
+     **CUBE regression (E=8 real):** 8/8 placed, 0 pen (2.9mm), posture natural (|j4|≤1.40, elbow≥1.14) — byte-
+     for-byte unchanged. Not committed (main agent reviews).

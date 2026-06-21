@@ -328,18 +328,41 @@ def _spawn_distractor_entity(scene, spec, pos_xy, z):
 
 
 def target_color(spec, free_color, rng):
-    """The GRASP TARGET's render colour. If the spec has a REALISTIC ``target_palette`` (apple red/green, banana
-    yellow/green, pen black/blue/red, tennis yellow-green), pick ONE palette entry and add a SMALL per-channel
-    jitter (+/-0.04) for natural variation -- a single-entry palette (tennis ball) thus stays its one true colour.
-    If the spec has NO palette (the cube), return the task's FREE distinct-from-table colour so the cube
-    collection is byte-for-byte. This is the FIX for the bug where the cube's free random colour was applied to
-    EVERY target (the PINK/blue banana). Specials get small/no DR (the palette IS the randomization)."""
+    """The GRASP TARGET's render colour (DR-strategist-owned per-object COLOUR POLICY; see the colour-policy table
+    in .claude/workbooks/dr_workbook.md). Three classes:
+      * NATIVE TEXTURE (apple): the spec declares ``native_texture`` -> the object renders its OWN UV-mapped skin
+        in spawn_target, so the flat colour here is unused (NO colour DR). We return a FIXED palette base (no
+        jitter) purely as the NATIVE_TEX=0 fallback colour -- the texture is the real colour.
+      * REALISTIC PALETTE with colour-DR (banana/pen): pick ONE palette entry + a SMALL per-channel jitter
+        (+/-0.04) for natural variation (banana yellow/green not pink; pen black/blue/red).
+      * FIXED colour, no DR (tennis_ball): a single-entry palette stays its one true regulation colour (the
+        +/-0.04 jitter on one entry is negligible -> effectively fixed).
+      * FREE random (cube): no palette -> the task's FREE distinct-from-table colour (cube byte-for-byte).
+    This is the FIX for the bug where the cube's free random colour was applied to EVERY target (the PINK banana)."""
     pal = getattr(spec, "target_palette", None)
     if not pal:
         return free_color                                       # cube: keep the free random distinct colour
+    if getattr(spec, "native_texture", None):                   # native-texture object: fixed fallback, NO DR
+        return tuple(np.asarray(pal[0], float).tolist())        # (texture wins in spawn_target; colour unused)
     base = np.asarray(pal[int(rng.randint(len(pal)))], float)
     jit = (rng.rand(3) - 0.5) * 0.08                            # +/-0.04 per channel -> subtle natural variation
     return tuple(np.clip(base + jit, 0.0, 1.0).tolist())
+
+
+def _target_usd_surface(spec, color):
+    """The GRASP-TARGET visual surface for a USD-sourced object. NATIVE TEXTURE (DR-strategist colour policy):
+    if the spec declares a ``native_texture`` (a UV-mapped diffuse image, e.g. the apple's apple_02.png) AND the
+    object's clean .obj actually carries UVs, render the object's OWN photoreal skin via gs.textures.ImageTexture
+    -- the SAME idiom the table tops use (verified in Nyx, no segfault). This makes the apple a realistic textured
+    apple instead of a flat pink blob. Otherwise (banana/pen clean.obj have NO UVs; the cube/sphere don't reach
+    here) fall back to the realistic flat ``color`` from the per-object palette. NATIVE_TEX=0 forces the flat
+    fallback (ablation)."""
+    use_tex = bool(getattr(spec, "native_texture", None)) and os.environ.get("NATIVE_TEX", "1") != "0"
+    if use_tex:
+        tex_path = OBJECTS / spec.native_texture
+        return gs.surfaces.Plastic(
+            diffuse_texture=gs.textures.ImageTexture(image_path=str(tex_path)), roughness=0.5)
+    return gs.surfaces.Plastic(color=color, roughness=0.5)
 
 
 def spawn_target(scene, spec, color, pos_xy=(0.40, 0.18), z=0.30):
@@ -349,8 +372,9 @@ def spawn_target(scene, spec, color, pos_xy=(0.40, 0.18), z=0.30):
     elongated/flat shape (a banana's curve, a pen's thin body, a book's flat slab) rather than a fat envelope.
     Procedural cube/sphere keep their exact box/sphere collider (already faithful). The visual is the procedural
     box/sphere for those sources, or the Nyx-safe clean .obj for USD sources (the textured USD segfaults Nyx, the
-    same reason the bowl + distractors render from clean meshes). ``color`` comes from the stage's distinct-from-
-    table picker so the target stays visible against the randomized table.
+    same reason the bowl + distractors render from clean meshes). VISUAL COLOUR: a USD target with a declared
+    NATIVE TEXTURE (the apple) renders its OWN UV-mapped skin (apple_02.png) via _target_usd_surface; otherwise
+    ``color`` (the per-object realistic palette) is used so the target stays visible against the randomized table.
     Returns the entity (its per-env pose/yaw/mass DR is applied by the caller after build, exactly as the cube)."""
     x, y = pos_xy
     fr = float(os.environ.get("TGT_FRIC", spec.friction[0]))   # higher friction -> a shallower grip still holds
@@ -378,12 +402,12 @@ def spawn_target(scene, spec, color, pos_xy=(0.40, 0.18), z=0.30):
     if single:
         return scene.add_entity(
             gs.morphs.Mesh(file=str(OBJECTS / spec.mesh_subpath), pos=(x, y, z), scale=spec.scale, convexify=True),
-            material=mat, surface=gs.surfaces.Plastic(color=color, roughness=0.5))
+            material=mat, surface=_target_usd_surface(spec, color))
     decomp = float(os.environ.get("TGT_DECOMP", getattr(spec, "grasp_decompose_err", 0.04)))
     return scene.add_entity(
         gs.morphs.Mesh(file=str(OBJECTS / spec.mesh_subpath), pos=(x, y, z), scale=spec.scale,
                        convexify=True, decompose_object_error_threshold=decomp, decimate=False),
-        material=mat, surface=gs.surfaces.Plastic(color=color, roughness=0.5))
+        material=mat, surface=_target_usd_surface(spec, color))
 
 
 def spawn_distractors(stage, dr, rng, target="cube"):

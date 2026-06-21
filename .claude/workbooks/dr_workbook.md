@@ -45,6 +45,27 @@ Per-env physics DR lives in `tasks/pickplace.py::sample_phys_dr`; per-build visu
 **Selected scope-B fields for this task:** cube pose (xy+yaw), bowl pose (xy), cube mass, cube/link friction,
 distractors. (Scopes A + C are automatic.)
 
+### Per-object COLOUR / TEXTURE policy (DR-strategist-OWNED; see the contract "Per-object colour/texture policy")
+The GRASP-TARGET's appearance is a per-object DR decision the strategist owns. Each object is one of three
+classes: **NATIVE TEXTURE** (the object's own UV-mapped skin — preferred when usable; no colour DR), **REALISTIC
+PALETTE** (a `target_palette` of realistic hues + ±0.04 jitter per demo, when no usable texture but a real colour
+range exists), or **FIXED** (a single-entry palette for a regulation/canonical colour). The main agent reflects
+the decision in `registry/object_spec.py` (`native_texture` / `target_palette` / `color`, commented as
+DR-strategist-owned). A NEW object gets classified here BEFORE it is collected.
+
+| object | class | render source | colour DR | evidence / rationale |
+|---|---|---|---|---|
+| **apple** | NATIVE TEXTURE | `objaverse/textures/apple_02.png` via `native_texture` | **none** (texture IS the colour) | `apple_clean.obj` fully UV-mapped (898 `vt`, all 1558 faces ref UVs); 1024² real apple texture (natural red mottling + stem); **renders in Nyx, no segfault** (probed 2026-06-20). Replaced the flat pink palette that overrode the real skin. |
+| **banana** | REALISTIC PALETTE | clean-mesh + `target_palette` | yellow×2 / green (unripe), ±0.04 | `banana_clean.obj` has **0 `vt`** (no UVs) → a texture can't map onto the Nyx-safe mesh; YCB USD segfaults Nyx. Palette yellow looked GOOD to the owner. NEVER pink/blue. |
+| **pen** (dry-erase marker) | REALISTIC PALETTE | clean-mesh + `target_palette` | black / blue / red, ±0.04 | `dry_erase_marker_clean.obj` has **0 `vt`** (no UVs). Normal marker colours only. |
+| **tennis_ball** | FIXED | procedural sphere + 1-entry palette | **none** (regulation) | regulation yellow-green felt `(0.82,0.92,0.22)`; single-entry palette → effectively fixed. Special-coloured object → no DR. |
+| **cube** | FREE random | procedural box + free distinct-from-table colour | full free hue | a generic shape with NO real-world colour → the only free-random target; keeps the cube collection byte-for-byte. |
+
+**Rule of thumb for a new object:** prefer NATIVE TEXTURE if the clean .obj carries UVs (`grep -c '^vt '` > 0) AND
+the texture renders in Nyx (probe it — the USD often segfaults, the clean mesh may lack UVs); else a REALISTIC
+PALETTE (realistic hues only — no blue watermelon, no oversized); FIXED for a regulation colour; FREE only for a
+generic colourless shape. Record the UV count + the Nyx render check as evidence.
+
 ### Experience log
 - **2026-06-19 — v2 baseline (B=10 × E=20 = 200).** `/data3/genesis_fulldr/cube_fulldr_v2`:
   **200/200 clean** (grasp 1.0, place 1.0), **0 abnormal penetration**, arms L/R = 103/97. The full-DR ranges
@@ -82,7 +103,34 @@ distractors. (Scopes A + C are automatic.)
     expected MAX-extent limiter) before a full re-collection. Confidence on pose range: **MED → HIGH** for 1.3
     (probed clean both directions). NOT yet applied to `sample_phys_dr` — proposed only.
 
+- **2026-06-20 — DR-strategist takes OWNERSHIP of the per-object colour/texture policy + 3 object improvements.**
+  The colour-policy table above is now the canonical per-object appearance decision (native-texture / realistic-
+  palette / fixed / free), owned here. Concrete changes this run (main-agent applied to `object_spec.py`, verified
+  by REAL renders, DISTURB=0, seed 7):
+  - **apple → NATIVE TEXTURE.** The flat pink `target_palette` overrode the apple's real skin. `apple_clean.obj`
+    is fully UV-mapped (898 `vt`) to `apple_02.png`; rendering it via `gs.textures.ImageTexture` (the table-top
+    idiom) gives a realistic textured apple (verified in Nyx, no segfault). `target_palette` kept as the
+    `NATIVE_TEX=0` fallback. Result E=12: **12/12 placed, 0 abnormal pen, max 4.4mm** (texture render proof saved).
+  - **banana / pen → kept REALISTIC PALETTE** — their clean .obj meshes have **0 `vt`** (no UVs), so a texture
+    can't map onto the Nyx-safe mesh; the YCB USD segfaults Nyx. (Owner already liked the banana yellow.)
+  - **tennis_ball → kept FIXED** regulation yellow-green (single-entry palette, no DR).
+  - **deeper-grasp tune (collision-#1 stays 0 abnormal):** apple `grasp_dz 0→-0.006` (cradles lower in the curved
+    GR100 claws; peak pen DROPPED 5.9→4.4mm). pen `grasp_dz 0→-0.004` + `grasp_close 0.9→0.78` (the thin pen's
+    firm pad-near-pad clamp over-bit it: E=24 stock **4/24 abnormal @8.1mm → 0/24 @6.5mm**; E=12 real 12/12,
+    0 abnormal, max 6.9mm — the pen rides near the 7mm gate, the hardest penetration case). tennis/banana deeper
+    seats REGRESSED (tennis place 11/12, banana 2/12 over-pen) → kept at their stock seat (already 12/12 @ ~6.5mm).
+  - **regression:** CUBE unchanged (no palette/texture/grasp_dz change) — E=8 real **8/8 placed, 0 pen (2.9mm),
+    posture natural** (|j4|≤1.40, elbow≥1.14). Confidence on the colour-policy classification: **HIGH** (each
+    class proven by a real render).
+
 ### Known hard corners (accept / label / keep)
+- **the PEN (thin ~2cm dry-erase marker) is the framework's hardest PENETRATION case.** The firm GR100 pinch
+  clamps pad-near-pad (the dofs clamp at `GR100_MEET=0.58`) on the thin body, so the high-kp PD wants to over-
+  bite it. `grasp_close=0.78` + `grasp_dz=-0.004` is the sweet spot (E=24 0/24 abnormal, max 6.5mm), but a
+  far-reach env can still nick ~6.9–7.3mm at E=12 — it RIDES the 7mm gate. `grasp_close` is **non-monotonic**
+  (≤0.76 is WORSE — the gentle target lets the body shift into a deeper bite); a deeper seat at the FULL close
+  over-bit it (4/24 abnormal). **Accept** the occasional gate-edge env as the pen's hard corner; do NOT chase it
+  with a deeper seat or a much gentler close. This is a GRASP-depth limit, not a DR-range limit.
 - **cube↔bowl tight clearance (`dr_clr` ≈ 0.125 m floor).** The hardest ~20% spawns sit near the floor; as
   pose widens, MORE envs ride it. The open gripper nearly grazes the bowl on the grasp descent. **Keep** —
   this is exactly the close-quarters recovery data the policy needs. Never relax the floor.
