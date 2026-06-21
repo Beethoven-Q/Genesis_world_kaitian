@@ -41,6 +41,27 @@ SCHEDULING v2 (RANDOM approach-timing + sense-delay):
   steps (simulating perception latency) before reporting the env as *informed*. Whether the solver is informed
   BEFORE vs AFTER the gripper closes is what selects CHASE vs RETRY -- and because the fire-step is random and
   the delay is fixed-ish, both branches occur across a batch.
+
+SINGLE-CONTINUOUS-PASS re-architecture (v3, the NO-HOLD fix):
+  The old staged seg1/seg2/seg3 path made the NORMAL envs FREEZE LIFTED IN THE AIR while the chase/recover envs
+  did their longer pivot (a per-env barrier the owner forbids: every trial must be fully INDEPENDENT, never
+  waiting for another env). v3 pre-plans EACH env's FULL trajectory up front and runs them in ONE continuous
+  pass, exactly like the clean path -- a clean env terminates early (natural termination -> shorter demo), a
+  chased/recovered env's trajectory is simply LONGER, but NO env ever holds waiting.
+
+  To pre-plan the chase/recover re-grasp BEFORE the run, we PREDICT the shoved resting pose at build time. The
+  shove is a god-mode impulse WE control (known velocity ``vel_xy`` + the per-env object friction), so the cube
+  slides a known distance and stops: ``rest = fire_pose + unit(v) * |v|^2 / (2*mu*g)`` (Coulomb friction,
+  ``mu`` = the object's friction, ``g`` = 9.81). Calibrated (scripts/temp/calib_shove_predict.py, GPU1, cube):
+  at ``mu = 1.0`` the predicted rest XY matches the REAL settled XY to ~1.1 cm mean / 1.7 cm max -- well within
+  the open-claw span, so the re-grasp (planned at the predicted pose) still cages the real cube. The shove still
+  fires via the during_step hook (a real physics slide); we only PREDICT where it lands so the whole per-env
+  path is known up front. :meth:`predict_shoved_xy` returns the per-env predicted rest XY.
+
+  ``informed_before_close`` (chase vs after-close) is fully determined at sample time -- it depends only on the
+  fire-fraction band + the sense-delay, NOT on any sim read -- so v3 resolves it at build time from the plan and
+  pre-plans the matching trajectory SHAPE per env (chase: re-aim before the close; after-close: close-on-nothing
+  then recover). :meth:`will_be_informed_before_close` computes it from the (known) approach length.
 """
 from __future__ import annotations
 
@@ -180,3 +201,49 @@ class DisturbanceSpec:
     def fired_any(self) -> np.ndarray:
         """Per-env bool: has this env's shove fired at all (regardless of sense delay)."""
         return self._fired.copy() if self._fired is not None else np.zeros(self.n_envs, bool)
+
+    # ------------------------------------------------------------------ #
+    # SINGLE-CONTINUOUS-PASS (v3) build-time helpers
+    # ------------------------------------------------------------------ #
+    def predict_shoved_xy(self, fire_xy: np.ndarray, mu, g: float = 9.81) -> np.ndarray:
+        """PREDICT each disturbed env's shoved RESTING xy at BUILD TIME (Coulomb friction slide):
+
+            rest = fire_xy + unit(vel_xy) * |vel_xy|^2 / (2 * mu * g)
+
+        ``fire_xy`` :(N,2) the object's xy at the moment the shove fires (the settled grasp-centre xy here, since
+        the shove fires early in the approach while the object is still at its settled pose). ``mu`` is the
+        object's friction (scalar or (N,)); ``g`` = 9.81. Returns (N,2): the predicted rest xy (== ``fire_xy``
+        for undisturbed envs). This is what lets the chase/recover re-grasp be PRE-PLANNED for the single
+        continuous pass (no sim read). Calibrated to ~1.1 cm mean error on the cube (see module docstring)."""
+        fire_xy = np.asarray(fire_xy, float).copy()
+        mu = np.broadcast_to(np.asarray(mu, float), (self.n_envs,))
+        spd = np.hypot(self.vel_xy[:, 0], self.vel_xy[:, 1])              # |v| per env (0 on undisturbed)
+        dist = np.where(spd > 1e-6, spd ** 2 / (2.0 * np.maximum(mu, 1e-6) * g), 0.0)
+        ux = np.where(spd > 1e-6, self.vel_xy[:, 0] / np.maximum(spd, 1e-6), 0.0)
+        uy = np.where(spd > 1e-6, self.vel_xy[:, 1] / np.maximum(spd, 1e-6), 0.0)
+        out = fire_xy.copy()
+        out[self.disturbed, 0] = fire_xy[self.disturbed, 0] + (ux * dist)[self.disturbed]
+        out[self.disturbed, 1] = fire_xy[self.disturbed, 1] + (uy * dist)[self.disturbed]
+        return out
+
+    def will_be_informed_before_close(self, approach_T: int) -> np.ndarray:
+        """BUILD-TIME resolution of CHASE vs AFTER-CLOSE per env, with NO sim read. An env is informed before the
+        close iff its shove fires AND ``sense_delay`` control steps elapse, all WITHIN the approach window of
+        ``approach_T`` control steps (the fire-step comes from ``fire_frac``; the close happens at the end of the
+        approach). This is the same condition the live ``informed_by(approach_T-1)`` checked, but computed up
+        front so the single-pass planner can choose each disturbed env's trajectory SHAPE (chase re-aim before
+        the close, vs close-on-nothing then recover) BEFORE the run. Returns a per-env bool (False if undisturbed)."""
+        fire_step = np.clip((self.fire_frac * max(approach_T - 1, 1)).round().astype(np.int32),
+                            0, max(approach_T - 1, 0))
+        informed_step = fire_step + self.sense_delay
+        return self.disturbed & (informed_step <= (approach_T - 1))
+
+    def arm_single_pass(self, fire_step_abs: np.ndarray):
+        """Arm the harness for the SINGLE continuous pass: set each disturbed env's ABSOLUTE fire-step (its step
+        within the ONE densified run, located inside ITS OWN first approach) and clear the latch. The task then
+        ticks every control step; :meth:`tick` fires the impulse at each env's ``fire_step_abs``. Unlike
+        ``reset_window`` (which resolved a fire-step from a fraction of a SHARED approach length), the absolute
+        step is per-env because each env's pre-planned trajectory has its own length/approach."""
+        self._fire_step = np.asarray(fire_step_abs, np.int32).copy()
+        self._fired = np.zeros(self.n_envs, bool)
+        self._fired_step = np.full(self.n_envs, -1, np.int32)

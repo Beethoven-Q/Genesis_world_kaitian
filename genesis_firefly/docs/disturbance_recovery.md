@@ -22,9 +22,21 @@ learns the target moved, it responds in one of two collaborative ways:
 > a per-env EXTENSION of that env's own trajectory; other envs finish and terminate at their own home (demos are
 > variable-length — see §2).
 
-Files: `skills/disturbance.py` (the harness: random-timing shove + sense-delay), `tasks/pickplace.py` (per-env
-execution: approach → close/chase → place-or-recover + detection + natural termination), `skills/executor.py`
-(the additive `during_step` hook + an optional `DQ_DEBUG` jerk-localiser — the only motion-path touch).
+> **v3 (2026-06-20) — SINGLE-CONTINUOUS-PASS re-architecture (the NO-HOLD fix).** The disturbance path used to
+> run STAGED seg1(approach)/seg2(close+lift)/seg3(place+recover). In seg2 the NORMAL envs finished close+lift
+> early and **FROZE LIFTED IN THE AIR (~4–5 s)** while the chase envs did their longer pivot — a per-env barrier
+> the owner forbids. v3 pre-plans **each env's FULL trajectory up front** and runs them in **ONE continuous
+> pass**, exactly like the clean path: a clean env terminates early (shorter demo), a chased/recovered env's
+> trajectory is simply LONGER, but **no env ever freezes waiting**. The mid-air hold is gone (verified — §6: the
+> worst mid-trajectory static-arm run is ~5–6 recorded frames, the natural pre-grasp/close settle, vs the old
+> 40–50+ frame frozen-lift). To pre-plan the chase/recover re-grasp BEFORE the run, the shoved resting pose is
+> **PREDICTED at build time** (we own the impulse): `rest = fire_xy + unit(v)·|v|²/(2·µ·g)` — see §1.
+
+Files: `skills/disturbance.py` (the harness: random-timing shove + sense-delay + **the build-time shoved-pose
+prediction + chase/after-close resolution**), `tasks/pickplace.py` (the **single-pass per-env trajectory
+assembly**: clean / chase / after-close-recover, all pre-planned + run in ONE `run_phase` + natural
+termination), `skills/executor.py` (the additive `during_step` hook + an optional `DQ_DEBUG` jerk-localiser —
+the only motion-path touch).
 
 ---
 
@@ -76,6 +88,29 @@ informed = dspec.informed_by(t)       # True once shove fired AND sense_delay st
 The decision is read once at the end of the approach: `informed_before_close = informed_by(T_A1 - 1)`. That
 boolean selects CHASE vs RETRY per env.
 
+### Build-time shoved-pose PREDICTION (v3, what makes the single continuous pass possible)
+For the single-pass re-architecture (§2) the chase/recover re-grasp must be PRE-PLANNED — but the shove physically
+lands DURING the run. Because the shove is a god-mode impulse WE control (known `vel_xy` + the per-env object
+friction), we PREDICT where the object comes to rest, at BUILD TIME, with a Coulomb-friction slide:
+
+```python
+rest_xy = fire_xy + unit(vel_xy) * |vel_xy|**2 / (2 * mu * g)     # DisturbanceSpec.predict_shoved_xy(...)
+```
+
+- `fire_xy` = the object's settled grasp-centre xy (the shove fires early in the approach, before the arm gets
+  near, so the object is still at its settled pose when it fires).
+- `mu` = the **effective slide friction**, **CALIBRATED** (not the nominal spec friction): `scripts/temp/
+  calib_shove_predict.py` fires the real shove on the firm table and fits `mu`. At **`mu = 0.85`** the predicted
+  rest xy matches the REAL settled xy to **~1.2 cm mean / 1.6 cm max** — well within the open-claw span, so the
+  re-grasp planned at the predicted pose still cages the real cube. (`mu = 1.0`, the nominal cube friction,
+  slightly UNDER-predicts the slide → the re-grasp lands a touch short.) Override with `SHOVE_MU`.
+- The shove **still fires** via the `during_step` hook at the per-env fire-step (a REAL physics slide); we only
+  PREDICT where it lands so the whole per-env path is known up front.
+
+`chase`-vs-`after-close` is ALSO resolved at build time (`DisturbanceSpec.will_be_informed_before_close
+(approach_T)`) — it depends only on the fire-fraction band + the sense-delay, no sim read — so the matching
+trajectory SHAPE is pre-planned per env.
+
 ---
 
 ## 2. Execution model — per-env, NO cross-env barrier (`tasks/pickplace.py`)
@@ -96,37 +131,42 @@ waiting for a slow env (the old idle-in-the-air bug). Each env's stream densifie
 reach home first and the recorder **trims each env's idle-home tail** → **variable-length demos** (per-env
 natural termination — see below). This is the path the grasp-solving runs and the bulk fine-tune collections use.
 
-### Disturbed case — `DISTURB>0` (opt-in), still per-env with NO lifted barrier
-Three lightweight segments — only because the chase/recovery needs the post-shove pose READ from the sim (the
-god-mode privilege). It is **not** a global barrier:
+### Disturbed case — `DISTURB>0` (opt-in): a SINGLE continuous per-env trajectory, ZERO mid-trajectory holds
+**No staging, no barrier, no sim read mid-run.** Each env's FULL trajectory is pre-planned at build time (using
+the shoved-pose PREDICTION, §1) and the whole batch runs in ONE `run_phase` — exactly like the clean path. Three
+trajectory SHAPES, chosen per env at build time:
 
-- **seg1 APPROACH** (`home → pre → at → at`, OPEN). The shove fires at each disturbed env's random step inside
-  this window; the harness counts the sense-delay from there. The gripper doesn't close yet, so an env informed
-  here can ABORT and chase.
-- **seg2 CLOSE + LIFT** (chase envs pivot to the cube's NEW sensed pose). **CHASE envs** get the smooth
-  singularity-robust re-grasp (§3): rise → reorient → pre → at → close → lift. **Other envs** do a pure-dwell
-  close + lift at the current pose; an after-close env's cube has slid away → closes on nothing → fails.
-- **Detection (god-mode):** `grasp_failed = did_not_rise OR empty_close`, read from `cube.get_pos()` + the
-  driven gripper joint + the EE link (`did_not_rise = rise < 3 cm`; `empty_close = claws met the empty stop AND
-  the grasp-centre is far from the EE`).
-- **seg3 PLACE-or-RECOVER (one batch, the barrier-killer).** Each env runs its OWN continuous remainder:
-  - a **HELD** env runs `place → home` straight away;
-  - a **FAILED** env runs `rise(small) → reopen → relocate → re-grasp → lift → place → home` — **one** recovery
-    attempt ("rise a bit, try the new pose").
+- **undisturbed** — `home → pre → at → close → lift → carry → lower → release → home` (byte-identical to the
+  clean `pick_wps + place_tail`).
+- **chased** (informed before the close) — `home → pre → at(old) → [re-aim: reorient → rise → pre → at] →
+  close → lift → place → home`. The first approach reaches the OLD pose but **never closes there** (the gripper
+  stays OPEN); the arm immediately re-aims to the PREDICTED shoved pose and closes THERE. The first approach uses
+  a **single** `at` (not the clean pick's `at,at` pre-close settle) — the chase never closes at the old pose, so
+  a settle dwell there would be a pointless mid-trajectory HOLD. A near-no-op re-aim `reorient` (when the
+  re-selected tilt ≈ the original) is **skipped** so the chase flows `at(old) → rise` continuously.
+- **after-close** (informed only after the close) — `home → pre → at → close(EMPTY, old) → lift(empty) →
+  [recover: rise → reorient → pre → at → close → lift] → place → home`. The first approach genuinely **closes on
+  nothing** at the old (now-vacated) pose — a real empty close in the sim (the failed-grasp signal we want) —
+  then the recover re-grasp picks up the cube at the PREDICTED pose. `recovery_attempts = 1`.
 
-  Both run in the SAME batch, so a held env executes its place→home **concurrently** with the recovery and
-  **terminates at its own home** — it never idles in the air through the recovery (this is what replaced the old
-  Phase-B retry loop, where every successful env HELD its lifted cube through ≤2 retry iterations of the slowest
-  env ≈ the ~5 s mid-air idle the owner flagged). `RETRY_RISE = 0.10 m` keeps the re-grasp in the dexterous
-  workspace (no near-singularity straighten — §3). The carry/place orientation follows the achieved grasp quat.
+The chase/recover re-grasp reuses the LOCKED `approach_close_lift_wps` builder (`reorient → rise → pre → at →
+close → lift`, each segment pure-translation or pure-rotation so the warm IK never flips a branch — §3), with the
+grasp/carry tilt **re-selected at the predicted shoved pose** (the same wrist-margin relax ladders → natural
+posture). `RETRY_RISE = 0.10 m` keeps the re-grasp in the dexterous workspace.
+
+Because every env runs its own pre-planned stream to completion in the SAME batch, a clean/chase env reaches home
+and **terminates early** (shorter demo) while a recovering env runs longer — **no env ever freezes lifted waiting
+for another** (the old seg2 mid-air hold is structurally impossible now: there is no point where a finished env
+holds while another runs). **Both modes ship hold-free** — the after-close mode was NOT deferred.
 
 ### Per-env natural termination (variable-length demos)
 The executor pads every env to the global max T (hold-last-pose) so the slowest env can finish; a faster env
 then sits STATIC at home for the tail. That idle-home tail is **not recorded** — the writer trims each env to its
 own last MOTION frame (+ a tiny settle margin), detected on the recorded joint stream (the home hold is exactly
 static, PD jitter < 1e-4 rad/frame; real motion is >> 1.5e-3). **Demos come out variable-length and that is
-natural + accepted** (LeRobot supports it). Because the clean path is one continuous trajectory, this only ever
-trims a true static tail — there is no mid-trajectory hold to trim.
+natural + accepted** (LeRobot supports it). Because **both** paths (clean AND disturbed) are now one continuous
+per-env trajectory, this only ever trims a true static HOME tail — there is no mid-trajectory hold to trim (the
+NO-HOLD checker confirms the worst mid-trajectory static-arm run is ~5–6 frames, the pre-grasp/close settle).
 
 ---
 
@@ -177,9 +217,9 @@ In addition to the existing attrs (`success`, `max_penetration_mm`, `penetrating
 `disturb_outcome` semantics:
 - **`chased`** — informed before close: aborted the close, pivoted/chased to the new pose, ended PLACED
   (moving-object data). `recovery_attempts == 0`.
-- **`recovered`** — informed after close and ended PLACED: either the empty close FAILED and a smooth low retry
-  re-grasped the new pose (`recovery_attempts > 0`, the failure→recover data), OR the late shove was benign and
-  the grasp rode through it (`recovery_attempts == 0`). The attempt count distinguishes the two.
+- **`recovered`** — informed after close and ended PLACED: the (pre-planned) empty close at the old pose grabbed
+  nothing → a smooth low recover re-grasp picked the cube up at the PREDICTED pose (`recovery_attempts == 1`, the
+  failure→recover data).
 - **`failed`** — disturbed but did NOT end cleanly placed — a legit hard edge case the place/penetration gate
   correctly REJECTS (`success=False`), labelled rather than hidden.
 - **`none`** — not disturbed.
@@ -195,11 +235,12 @@ ALL other self-contact (arm-into-arm, claw-into-other-gripper) still counts.
 Each run prints (the per-env demo-length line appears on EVERY run, disturbed or not):
 
 ```
-[COLLECT] disturbance: shoved K env(s) [...] (prob=p, approach_T=..); before_close(chase)=c after_close(retry)=r
-[COLLECT] detect after pick: failed=f/N (disturbed ../..)
+[COLLECT] disturbance v3 (single-pass): disturbed d env(s) [...] (prob=p, approach_T=..); before_close(chase)=c after_close(recover)=r
+[COLLECT] disturbance: shoved K env(s) [...] (fire steps=[...])
 [COLLECT] disturbance: d disturbed (c chased, r recovered, f failed)  recovery_attempts(disturbed)=[...]
 [COLLECT] per-env demo length (natural termination): min=.. max=.. mean=.. of Tr=.. recframes
 ```
+(`DISTURB_DIAG=1` adds a per-disturbed-env line comparing the PREDICTED shoved xy to the cube's final xy.)
 
 ---
 
@@ -217,10 +258,11 @@ CUDA_VISIBLE_DEVICES=0 DISTURB=0.5 ... ./.venv/bin/python genesis_firefly/tasks/
 CUDA_VISIBLE_DEVICES=0 DISTURB=0.5 DQ_DEBUG=1 ...
 ```
 
-Env vars: `DISTURB` (per-env disturbance probability; **default 0 = off**, set e.g. 0.5 to opt in), `DQ_DEBUG`
-(per-phase jerk localiser), `DATA_DIR`, `OUT_DIR`, `DIST_DEBUG` (distractor displacement trace). Prereqs: the
-venv (`./.venv`), one GPU (`CUDA_VISIBLE_DEVICES=k`, one sim process per GPU), the Genesis firefly assets. Run
-from the repo root.
+Env vars: `DISTURB` (per-env disturbance probability; **default 0 = off**, set e.g. 0.5 to opt in), `SHOVE_MU`
+(shoved-pose prediction friction; default 0.85 calibrated), `DISTURB_DIAG` (per-env predicted-vs-actual shoved
+pose), `FAST` (hdf5-only, no videos — for fast iteration), `DQ_DEBUG` (per-phase jerk localiser), `DATA_DIR`,
+`OUT_DIR`, `DIST_DEBUG` (distractor displacement trace). Prereqs: the venv (`./.venv`), one GPU
+(`CUDA_VISIBLE_DEVICES=k`, **one sim process per GPU**), the Genesis firefly assets. Run from the repo root.
 
 ---
 
@@ -237,40 +279,63 @@ from the repo root.
 
 `z`-change ≈ 0 throughout. We use `(0.70, 0.95)` → a reliable ~3–5 cm shift.
 
-### (a) Clean default (`DISTURB=0`, E=8, seed 7, cube) — the single-trajectory foundation
+### Shoved-pose PREDICTION calibration (`scripts/temp/calib_shove_predict.py`, GPU 1, cube)
+Predicted rest xy (`d = |v|²/(2µg)`) vs the REAL settled xy, per `mu`:
+
+| `mu` | predicted slide (mean) | **prediction error** (mean / max) |
+|---|---|---|
+| 0.70 | 4.7 cm | 1.7 / 2.6 cm |
+| 0.80 | 4.1 cm | 1.3 / 1.9 cm |
+| **0.85** | **3.9 cm** | **1.2 / 1.6 cm** ← default |
+| 1.00 | 3.3 cm | 1.1 / 1.7 cm (under-predicts the slide) |
+
+Actual slide mean 3.5 cm. We use **`mu = 0.85`** (`SHOVE_MU` override) — the re-grasp planned at the predicted
+pose lands within ~1.2 cm of the real cube, inside the open-claw span.
+
+### (a) Clean default (`DISTURB=0`, E=8, seed 7, cube) — the single-trajectory foundation (UNCHANGED)
 ```
 [COLLECT] 8/8 grasped, 8/8 placed, through-wall=0/8
 [COLLECT] penetration: max=2.7mm (thresh=7mm), abnormal=0/8
 [COLLECT] disturbance: 0 disturbed (0 chased, 0 recovered, 0 failed)
-[COLLECT] per-env demo length (natural termination): min=104 max=110 mean=107 of Tr=110 recframes
+[COLLECT] per-env demo length (natural termination): min=91 max=99 mean=96 of Tr=99 recframes
 ```
-8/8 grasp+place, **penetration 0**, **max |dq| ≈ 0.03 rad** (very smooth), **VARIABLE-LENGTH demos (104–110)** —
-each env runs one continuous `pick→place→home` and terminates at its own home, no mid-air hold, no barrier.
+8/8 grasp+place, **penetration 0**, **max |dq| = 0.020 rad** (very smooth), **VARIABLE-LENGTH demos (91–99)** —
+each env runs one continuous `pick→place→home` and terminates at its own home, no mid-air hold, no barrier. The
+trajectory is **byte-identical** to before the v3 disturbance re-architecture (only the disturbance branch + the
+FAST write-skip changed; the clean branch is untouched).
 
-### (b) Disturbance opt-in (`DISTURB=0.5`, E=8, seed 7) — both modes appear, NO cross-env wait
+### (b) Disturbance opt-in (`DISTURB=0.5`, E=16, seed 7) — both modes appear, single pass, NO HOLD
 ```
-[COLLECT] disturbance: shoved 5 env(s) [0, 1, 2, 4, 5] (prob=0.5, approach_T=292); before_close(chase)=1 after_close(retry)=4
-[COLLECT] detect after pick: failed=3/8 (disturbed 3/5)
-[COLLECT] executed T=2091 (3 left / 5 right arm)  max per-step |dq|=0.076 rad (all phases)
-[COLLECT] 8/8 grasped, 8/8 placed, through-wall=0/8
-[COLLECT] penetration: max=3.0mm (thresh=7mm), abnormal=0/8
-[COLLECT] disturbance: 5 disturbed (1 chased, 4 recovered, 0 failed)  recovery_attempts(disturbed)=[1, 0, 1, 1, 0]
-[COLLECT] per-env demo length (natural termination): min=140 max=214 mean=171 of Tr=214 recframes
+[COLLECT] disturbance v3 (single-pass): disturbed 7 env(s) [...] (prob=0.5, approach_T=304); before_close(chase)=5 after_close(recover)=2
+[COLLECT] disturbance: shoved 7 env(s) [...] (fire steps=[200, 266, 316, 299, 343, 266, 287])
+[COLLECT] executed T=1584 (6 left / 10 right arm)  max per-step |dq|=0.020 rad (all phases)
+[COLLECT] 15/16 grasped, 15/16 placed, through-wall=0/16
+[COLLECT] penetration: max=3.1mm (thresh=7mm), abnormal=0/16
+[COLLECT] disturbance: 7 disturbed (4 chased, 2 recovered, 1 failed)  recovery_attempts(disturbed)=[0, 1, 0, 0, 0, 1, 0]
+[COLLECT] per-env demo length (natural termination): min=95 max=160 mean=113 of Tr=160 recframes
 ```
 
 **Reading it.**
-- **Both modes occur:** 1 before-close CHASE + 4 after-close; detection flagged exactly the 3 genuine
-  closed-on-nothing misses; **all recovered → 8/8 placed** in one attempt (`recovery_attempts=[1,0,1,1,0]`).
-- **NO cross-env wait — the headline.** Demo lengths span **140 → 214 recframes**: the clean/held envs terminate
-  at ~140 while the recovering envs run to 214, **each at its OWN home**. A held env is ~74 recframes (~7 s)
-  shorter — it does NOT idle in the air through another env's recovery (the old Phase-B barrier is gone). This
-  is the owner's per-env-independence rule, proven in the data.
-- **Motion SMOOTH:** all-phase max |dq| **0.076 rad < 0.12** (no near-singularity spike), incl. the chase + the
-  recovery (the rise→reorient→descend decomposition, §3). **Penetration 0** abnormal (empty-close finger↔finger
-  contact correctly allow-listed).
+- **Both modes occur, both hold-free:** 5 before-close CHASE + 2 after-close RECOVER (the after-close mode was
+  NOT deferred). 7 disturbed → **4 chased + 2 recovered = 6 placed**, 1 failed (a hard edge-of-workspace shove,
+  correctly labelled `failed` and rejected). All 16 → 15/16 placed.
+- **NO-HOLD gate (the load-bearing one) — `scripts/temp/check_no_hold.py`.** Per demo, the longest run of
+  consecutive recorded frames with the active-arm joints static (max |Δj| < 1e-3) BEFORE home arrival, excluding
+  the home tail + the gripper-ramp dwells. **Worst mid-trajectory static-arm run across all 16 demos = 6 frames**
+  (a chase's pre-grasp/close settle), per-demo 0–6. A frozen LIFTED arm (the old seg2 barrier) would be 40–50+
+  frames — **ELIMINATED.** The disturbed (chase/recover) demos show the SAME tiny static profile as the clean
+  demos → no extra hold was introduced.
+- **Per-env termination:** demo lengths **95 → 160** (clean/chase envs terminate ~95–120, recovering envs run to
+  ~160), each at its OWN home — no env idles waiting.
+- **Posture (natural):** worst wrist |j4| = 1.445 (≤ ~1.45), worst-low elbow j3 = 0.961 (≥ ~1.0) — both from
+  CLEAN envs; the disturbed re-grasps are well inside (j4 ≤ 1.37, j3 ≥ 1.02).
+- **Motion SMOOTH:** all-phase max |dq| **0.020 rad** (no near-singularity spike), incl. the chase + the recovery
+  (the rise→reorient→descend decomposition, §3). **Penetration 0** abnormal (empty-close finger↔finger contact
+  correctly allow-listed).
 
-> Re-verify on the per-env code: `CUDA_VISIBLE_DEVICES=0 DISTURB=0.5 FAST=1 ./.venv/bin/python
-> genesis_firefly/tasks/pickplace.py 8 7` (drop `FAST=1` for the photoreal videos).
+> Re-verify: `CUDA_VISIBLE_DEVICES=1 DISTURB=0.5 FAST=1 ./.venv/bin/python genesis_firefly/tasks/pickplace.py 16 7`
+> (drop `FAST=1` for the photoreal videos), then
+> `./.venv/bin/python genesis_firefly/scripts/temp/check_no_hold.py <DATA_DIR>/demos.hdf5`.
 
 ---
 

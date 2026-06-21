@@ -79,10 +79,14 @@ TARGET=banana CUDA_VISIBLE_DEVICES=0 ./.venv/bin/python genesis_firefly/tasks/pi
 | **distractor pool** | **excludes the target's own type** so the target is never ambiguous among lookalikes (cube target → the legacy `{pen,banana,apple,tennis_ball,book}`; a banana target → `{pen,apple,tennis_ball,book,cube}`). |
 | **scoring** | `place_xy_tol` = 6cm (cube) or `spec.place_xy_tol_cm` (bigger objects whose bbox centre rests a few cm off the bowl centre); a non-cube height band allows an elongated body draped across the rim. |
 
-**Debug knobs (env, off by default — for grasp/DR tuning only):** `FAST=1` skips the Nyx render in the run loop
-(~6× faster, blank policy videos — never for a real collection), `GRASP_DZ`/`CLOSE_G`/`TGT_FRIC`/`TGT_SINGLE_HULL`/
-`TGT_DECOMP` override the per-object grasp params, `DETECT_DEBUG=1` prints the per-env grasp-failure signals,
-`PEN_TRACE=1` prints the worst-ever penetration per phase.
+**Debug knobs (env, off by default — for grasp/posture/penetration tuning only):** `FAST=1` skips the Nyx render
+in the run loop (~6× faster) AND skips ALL video/tile/montage/preview writing — it writes **ONLY `demos.hdf5`**
+(the numeric data the posture/penetration checks read) + the `[COLLECT]` prints, **no `.mp4`/`.png` at all** (the
+old FAST wrote blank "black-stripe" placeholder videos; that is gone — never use FAST for a real collection, it
+produces no policy videos). `GRASP_DZ`/`CLOSE_G`/`TGT_FRIC`/`TGT_SINGLE_HULL`/`TGT_DECOMP` override the per-object
+grasp params, `SHOVE_MU` overrides the disturbance shoved-pose prediction friction (default 0.85, calibrated),
+`DISTURB_DIAG=1` prints predicted-vs-actual shoved pose per disturbed env, `PEN_TRACE=1` prints the worst-ever
+penetration per phase.
 
 ### 1a-ter. Per-object status (2026-06-20)
 

@@ -463,3 +463,32 @@ agent-native; subagents for context; rigorous, no hallucination.
      (4.4mm) · tennis 12/12 (6.4mm) · banana 12/12 (6.7mm) · pen 12/12 (6.9mm) — all 0 abnormal, natural posture.
      **CUBE regression (E=8 real):** 8/8 placed, 0 pen (2.9mm), posture natural (|j4|≤1.40, elbow≥1.14) — byte-
      for-byte unchanged. Not committed (main agent reviews).
+- **2026-06-20 — DISTURBANCE single-continuous-pass re-architecture (the NO-HOLD fix) + FAST writes zero videos.**
+  Two task-file changes; clean path + all locked logic untouched. *(1) NO-HOLD (the load-bearing one).* The
+  disturbance path still used STAGED seg1(approach)/seg2(close+lift)/seg3(place+recover). In seg2 the NORMAL envs
+  finished close+lift early and **FROZE LIFTED IN THE AIR (~4–5 s)** while the chase envs did their longer pivot —
+  a per-env barrier the owner forbids. *Change:* re-architected to a **SINGLE continuous per-env trajectory**,
+  exactly like the clean path — each env's FULL trajectory (clean / chase / after-close-recover) is **pre-planned
+  up front** and the whole batch runs in ONE `run_phase`; a clean/chase env terminates early (shorter demo), a
+  recovering env runs longer, **no env ever freezes waiting**. *Key enabler:* to pre-plan the chase/recover
+  re-grasp BEFORE the run (no sim read), the shoved resting pose is **PREDICTED at build time** — `rest = fire_xy
+  + unit(v)·|v|²/(2·µ·g)` (Coulomb slide; we own the impulse). **Calibrated** (`scripts/temp/calib_shove_predict.py`,
+  GPU1): at `µ=0.85` the prediction matches the REAL settled xy to **~1.2 cm mean / 1.6 cm max** — inside the
+  open-claw span, so the re-grasp planned at the prediction cages the real cube. chase-vs-after-close is also
+  resolved at build time (`DisturbanceSpec.will_be_informed_before_close`, no sim read). The shove STILL fires via
+  the `during_step` hook at a per-env fire-step inside each env's own first approach (a real physics slide). Two
+  small mid-traj-hold fixes for the chase: single `at` in the first approach (the chase never closes there) + skip
+  a near-no-op re-aim reorient. **Both modes ship hold-free — the after-close mode was NOT deferred.** *Verified:*
+  **NO-HOLD checker** (`scripts/temp/check_no_hold.py`, DISTURB=0.5 E=16 seed7 real-render): worst mid-trajectory
+  static-arm run **= 6 frames** (per-demo 0–6, the pre-grasp/close settle) vs the old 40–50+ frame frozen-lift —
+  **eliminated**; the disturbed demos show the SAME tiny static profile as the clean demos. 7 disturbed → 4 chased
+  + 2 recovered = 15/16 placed, 1 failed (hard edge-of-workspace shove, correctly labelled+rejected); demo lengths
+  **95→160** (per-env natural termination); max|dq|=0.020 (smooth, no flip); **penetration 0 abnormal**; posture
+  worst |j4|=1.445 / elbow 0.961 (both from CLEAN envs; disturbed re-grasps inside). **CLEAN regression (DISTURB=0
+  E=8 seed7):** 8/8 grasp+place, 0 abnormal pen (2.7mm), max|dq|=0.020, demos 91–99 — `T=977` byte-identical to
+  before. *(2) FAST.* `FAST=1` now writes **ONLY `demos.hdf5`** + the `[COLLECT]` prints — the blank-frame
+  placeholder machinery (the "thin black-stripe" junk videos) is removed; the per-cam mp4s / third-person tile /
+  fourview clips / distractor preview PNGs are all SKIPPED. Verified: a FAST run leaves **0 `.mp4`/`.png`** in
+  DATA_DIR + OUT_DIR. Edited only `tasks/pickplace.py` (disturbance branch + FAST write-skip) + `skills/disturbance.py`
+  (prediction + build-time resolution); docs `disturbance_recovery.md` (v3) + this entry. Not committed (main agent
+  reviews/gates).
