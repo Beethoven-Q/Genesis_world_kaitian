@@ -17,7 +17,7 @@ phase lands. Requirements live in [project_overview.md](project_overview.md) (bl
   per-demo `DRPlan` → HDF5.
 - **P3 — Build-batch orchestration**: B subprocess builds × E envs, half-left/half-right, merge shards; **/data3
   storage + output symlink**. → the **200-trial full-DR collection**.
-- **P4 — Agency**: DR subagent + workbook; object-refiner + disturbance-agent stubs; the virtual-EE skill.
+- **P4 — Agency**: DR subagent + workbook; object-refiner agent; the virtual-EE skill.
 - **P5 — More objects + Line C**: solve apple / tennis-ball / banana / marker-pen pick-place; then **Line C
   dexterous-hand integration** (candidate for a dedicated worktree-isolated subagent).
 
@@ -35,55 +35,27 @@ phase lands. Requirements live in [project_overview.md](project_overview.md) (bl
   ORIENTATION + RoboLab-faithful WRIST-MARGIN relax-tilt PLANNING: `GraspContext` (the immutable per-collect
   bundle), `grasp_quat_at` / `cquat` (the grasp/carry quat builders, incl. the cube-π/2 vs elongated-π symmetry
   fold), `select_grasp_tilt` / `select_place_tilt` (prefer top-down, relax to the smallest tilt keeping |j4|≤1.40
-  & j3≥1.05 through pre-grasp+lift / over-bowl carry), and the `*_at` recovery variants for the disturbance
-  re-grasp. Pure functions over `GraspContext` + an explicit `solve`/`gqA` (de-closured out of `collect()`). Any
-  task imports them; the disturbance trajectory assembly stays in the task and just calls them. *(built — see progress log)*
+  & j3≥1.05 through pre-grasp+lift / over-bowl carry). Pure functions over `GraspContext` + an explicit `solve`/`gqA`
+  (de-closured out of `collect()`). Any task imports them. *(built — see progress log)*
 - **Object factory** (`world/object_factory.py`) — the ONE shared spec→sim-entity builder (collision + visual +
   native texture): `spawn_target` / `spawn_distractors` / `build_object` / `target_color`. Any task imports it and
   gets the verified collision + recognizable-texture behaviour with no copy-paste fork. *(built — see progress log)*
 
 ## Progress log
-- **2026-06-21 — Disturbance extracted (modularity 3/3) + RECOVERY made god-mode READ-BASED + GENERAL + HOLD-FREE.**
-  Moved the disturbed-trajectory ASSEMBLY out of `collect()` into `skills/disturbance.py` (de-closured over a small
-  `DisturbExec` context, mirroring `GraspContext`): `build_phase1` / `build_phase2` (the per-env trajectory builders),
-  `select_recovery_grasp` + `recovery_grasp_quat` (the god-mode grasp), `regrasp_wps`, `grasp_succeeded`,
-  `fire_steps_from_plan`. `tasks/pickplace.py`'s disturbed branch is now a thin orchestrator (build context → phase 1
-  → god-mode read → phase 2). The CLEAN `DISTURB=0` `pick_wps+place_tail` path stays in the task, byte-identical
-  (cube 8/8 · T=977 · lengths identical to HEAD; objects clean-path unchanged). **The recovery-accuracy fix
-  (owner-flagged):** the old path predicted the shoved xy and re-grasped at the cube's ORIGINAL yaw → the retry
-  missed the rotated cube. Now the recovery is **god-mode read-based** on the owner's simple logic: informed BEFORE
-  the close → don't close, read the cube's ground-truth pose + grasp there; informed AFTER → if the attempt still
-  caught the cube (the "+8 cm" was a SUCCESS, the close caught it + lifted it) keep going + place it, else reopen +
-  rise + read + re-grasp. Every re-grasp reads the cube's **full 6-DOF** ground-truth pose and builds the grasp from
-  the object's reference axis (long-axis / face / roll-snapped) rotated by the actual quat — so it HITS the object
-  however the (UNCONSTRAINED) shove relocated/rotated/tumbled it; **general over objects**, not cube-only. An
-  off-table / out-of-reach shove is detected from the read and routed straight home (a labelled FAILURE, not a NaN).
-  **Hold-free at the root:** every disturbed env runs its own pick-to-lift then continues to place/recover; the
-  per-env trim drops all padding so each saved demo's length depends ONLY on itself (no env waits). Verified DUAL
-  gate (cube, `DISTURB=0.5` N=16, seeds 7 & 23): **16/16 (or 15/16) placed, recovered>0, NO-HOLD worst = 6 frames**,
-  0 abnormal penetration. See `docs/disturbance_recovery.md`. *(Known boundary: very thin (pen) / rolling (ball)
-  targets under a strong unconstrained shove reach poses that are unrecoverable or trigger the object's own firm-
-  grasp fragility — a per-object grasp-robustness follow-up, separate from this pass; the cube is fully robust.)*
 - **2026-06-21 — Grasp ORIENTATION / WRIST-MARGIN planning extracted (agent-native modularity 2/3).** Moved the
   per-env grasp/carry quat builders + the RoboLab-faithful relax-tilt selection OUT of `collect()` (where they were
   CLOSURES over its locals) into `skills/grasp.py` as PURE functions: `grasp_quat_at`, `cquat`, `select_grasp_tilt`
-  (+ private `_posture_at_pick`), `select_place_tilt` (+ `_carry_posture`), and the disturbance-recovery variants
-  `select_grasp_tilt_at` / `select_place_tilt_at` (+ `_posture_at_pick_env`). The de-closure threads the former
+  (+ private `_posture_at_pick`), `select_place_tilt` (+ `_carry_posture`). The de-closure threads the former
   closure environment through a frozen **`GraspContext`** dataclass (built ONCE in `collect()`: side/base/htR/laxis/
   spec/yaw, the grasp-centre `gc` + over-bowl `bxyz`, APP/LIFT/PAPP, the tilt ladder + wrist/elbow thresholds); the
   two values that VARY at runtime — the active-arm `solve` callable and the mutated `gqA` quats — are passed
   EXPLICITLY (not frozen), so `select_place_tilt` reads the live `gqA` exactly as the closure did. Call sites are
-  1:1 (`grasp.grasp_quat_at(gctx, …)`); the DISTURBANCE trajectory assembly (chase/recover waypoints) stays in the
-  task and merely calls the moved planners (module 3). **Pure STRUCTURE move — function math byte-identical**
+  1:1 (`grasp.grasp_quat_at(gctx, …)`). **Pure STRUCTURE move — function math byte-identical**
   (verified: AST body-diff = only `ctx.`/arg threading; a pure-CPU harness gives 0.0 grasp-quat diff; the first
   IK-probe `GQ_DIAG` dump — `gq`/`pre` hashes + `qpre`/`qlift` to 6 dp — is bit-identical HEAD↔refactor). Gate
-  (FAST, seed7) vs committed HEAD: cube DISTURB=0 N=8 → **8/8, T=977, 0 abn**, grasp tilt `[8,16,8,8,16,16,8,8]` +
+  (FAST, seed7) vs committed HEAD: cube N=8 → **8/8, T=977, 0 abn**, grasp tilt `[8,16,8,8,16,16,8,8]` +
   place tilt `[16,16,8,16,16,16,16,16]` byte-identical; the cube hdf5 DR attrs diff = 0.0 (RNG order identical).
-  apple 12/12, banana 12/12, tennis 11/12, pen 12/12 (grasp-tilt arrays byte-identical, 0 abnormal pen). Disturbance
-  DISTURB=0.5 N=16 → same disturbed set `[0,2,5,7,12,14,15]`, same fire steps, same before/after-close phases, same
-  per-demo lengths, **T=1196**, **no-hold WORST=6 frames (PASS ≤8)**. The only deltas are 3rd-decimal IK jitter and a
-  single after-close recovery env's placed-outcome flip — both reproduced HEAD↔HEAD (HEAD itself ranges 13–15/16 on
-  this batch), i.e. GPU physics/IK nondeterminism, NOT a behaviour change.
+  apple 12/12, banana 12/12, tennis 11/12, pen 12/12 (grasp-tilt arrays byte-identical, 0 abnormal pen).
 - **2026-06-21 — Object factory extracted (agent-native modularity).** Moved the OBJECT SPAWN + TEXTURE concern
   out of `tasks/pickplace.py` into a NEW shared `world/object_factory.py` (`spawn_target`, `spawn_distractors`,
   `_spawn_distractor_entity`, `target_color`, `_target_usd_surface`) and consolidated the orphaned
@@ -274,17 +246,6 @@ phase lands. Requirements live in [project_overview.md](project_overview.md) (bl
   `pi05_hexarm_bowl_lora` → `pi05_genesis_cube_lora` (set LeRobot `repo_id="genesis_cube_fulldr_v2"`; the 14-D
   HexArm transforms + cam names are unchanged) → `compute_norm_stats` → fine-tune pi0.5. Full how-to:
   `lerobot_export.md`.
-- **2026-06-19 — Disturbance → failure-recovery (a HARNESS, not an LLM subagent).** Per-trial probability (~0.34,
-  `DISTURB=0` to disable) gently shoves the target cube in-plane DURING the grasp (`skills/disturbance.py`,
-  batched `set_dofs_velocity` on the cube free-joint x/y, calibrated to ~3-5cm miss, latched once) so the grasp
-  misses; the god-mode solver DETECTS it (cube rose <3cm OR empty-close + cube far) and RECOVERS by staged
-  replanning (rise→reopen→re-locate→re-grasp, ≤2 attempts, batched; clean envs hold) before place. The demo
-  records failed-grasp+recovery+success = the training signal. Verified: DISTURB=0 reproduces parity (16/16,
-  pen 0); DISTURB=0.34 detection EXACT (0 false-flags on 21 clean grasps), every detected failure recovered,
-  ~75-86% disturbed envs recover+place, pen 0, motion smooth (max|dq|~0.10). Added a keyword-only `during_step`
-  hook to BatchExecutor (additive). HDF5 attrs `disturbed/recovered/recovery_attempts`. Note: the staged refactor
-  raised the base no-disturbance max|dq| 0.03→0.098 (still smooth) — a minor phase-boundary-continuity polish for
-  later. Full spec: `disturbance_recovery.md`.
 - **2026-06-19 — DR-STRATEGIST agent layer (MVP) + sweep probe.** *Goal* (owner): make full DR more automatic —
   a specialized subagent + harness that pushes DR ranges to the MAX representative extent, models cross-axis
   couplings, and builds experience over runs. *Built* (P4 first slice): **(1)** `.claude/agents/dr-strategist.md`
@@ -350,16 +311,6 @@ phase lands. Requirements live in [project_overview.md](project_overview.md) (bl
   (object-refiner now [BUILT — MVP]).
 
 ## Planned refinements + forward plan (2026-06-20, owner directives)
-**A. Disturbance v2 — smoother + collaborative timing (failure-recover AND moving-object "chase" data).**
-- *Smoothness:* on a failed grasp the arm must rise only a SMALL amount to clear the view + retry — NOT lift high
-  to near-singularity (the current ~jerk). Detect the miss right at the gripper-close-on-nothing. All gentle.
-- *Collaborative timing:* fire the gentle shove at a RANDOM time during the APPROACH, then inform the task solver
-  after a reasonable sense-DELAY. If the solver is informed BEFORE the gripper closes → it GIVES UP the current
-  grasp, rises a little, and SMOOTHLY PIVOTS to the cube's new pose (gripper gently "chases" the moving object) →
-  *chase-a-moving-object* data. If informed AFTER close → too late, grasp fails → rise-a-bit + retry new pose →
-  *failure→recover→replan* data. One mechanism, both data modes.
-- *Future:* a rotating Lazy-Susan with the target on it → the solver reads the real-time pose + chases it →
-  moving-object grasp data.
 **B. Object-refiner v2 — multi-view collider check + verified keypoint/part labeling (virtual, physics-less).**
 - *Multi-perspective COLLIDER render* (the final collision check): after collision is correct, render the
   COLLIDER (vis_mode=collision) from several views for the AGENT to inspect + confirm (hollow stays hollow, solid
@@ -375,8 +326,8 @@ banana/pen/tennis-ball; round-object grasp = the caging challenge) → after own
 → then the **virtual-EE skill + mug-hang**. **Dexterous hand:** a NEW git BRANCH (it substitutes the gripper),
 clean + safe; goal = pick-place with dex-hand+arm, then throw-and-catch a tennis ball in a parabola. Stay
 agent-native; subagents for context; rigorous, no hallucination.
-- **2026-06-20 — APPLE/TENNIS/BANANA/PEN SOLVED on the natural-motion foundation (+ Task-0 disturbance recovery, +
-  realistic colors).** *Three real root-cause fixes, NO grasp machinery (the owner's "easy when the foundation is
+- **2026-06-20 — APPLE/TENNIS/BANANA/PEN SOLVED on the natural-motion foundation (+ realistic colors).**
+  *Three real root-cause fixes, NO grasp machinery (the owner's "easy when the foundation is
   correct" held):*
   (1) **ROUND-OBJECT EJECTION = a leaky friction cone, not geometry.** apple/tennis EJECTED 10-40cm under the firm
   GR100 pinch (and the thin pen SLIPPED, 0/12). A subagent traced it: `firm_rigid_options()` docstring CLAIMED
@@ -395,12 +346,6 @@ agent-native; subagents for context; rigorous, no hallucination.
   free and could land ~π from home → the go-home FLIPPED joint_6 (a ~3 rad snap on 3/12 apple returns, recorded).
   FIX: snap the round grasp roll to the branch nearest the HOME wrist (the existing `transport_quats` pick) →
   max|dq| 3.3 → **0.02**, no jerks.
-  *Task 0 (disturbance recovery):* the chase/recovery re-grasps reused the ORIGINAL grasp tilt → the wrist
-  saturated at the shoved pose (2/16 recovery demos j4=1.57). FIX: re-run the wrist-margin relax ladder at the
-  SHOVED pose (`select_grasp_tilt_at`/`select_place_tilt_at`), fold the recovery RISE-apex + descent into its
-  score, and **reorient-first then rise** (the rise was the saturation, at the OLD orientation). Result
-  `DISTURB=0.5 N=16`: **16/16 placed, 0 abnormal pen, max|dq|=0.029, all recovery/chase demos j4≤1.44** (was 1.57),
-  chase+recover intact (5 chased / 2 recovered).
   *Color:* the cube's FREE random color was applied to EVERY target (banana rendered PINK). FIX: a realistic
   per-object `target_palette` in the spec (apple red/green · banana yellow/green · tennis yellow-green · pen
   black/blue/red); the cube keeps its free random color (palette=None → byte-identical). `target_color()` picks +
@@ -408,19 +353,15 @@ agent-native; subagents for context; rigorous, no hallucination.
   *VERIFIED (DISTURB=0, N=12, FAST + 1 real render each):* placed/12 · max_pen(abnormal) · posture(j4max/j3min):
   **cube 12/12 · 2.5mm(0) · 1.40/1.14** · **apple 12/12 · 5.7mm(0) · 1.43/1.07** · **tennis 12/12 · 6.4mm(0) ·
   1.43/0.98** · **banana 12/12 · 6.7mm(0) · 1.41/0.85** · **pen 10/12 clean (2 thin-pen over-pen at ~7.6mm) ·
-  POSTURE OK 1.39/1.08**. All max|dq| ≈ 0.02 (smooth). Edits: `tasks/pickplace.py` (Task-0 re-tilt, symmetry fold,
+  POSTURE OK 1.39/1.08**. All max|dq| ≈ 0.02 (smooth). Edits: `tasks/pickplace.py` (symmetry fold,
   round roll, color), `registry/object_spec.py` (palettes, grasp_noslip, pen single-hull), `world/firefly_scene.py`
   (`noslip_iterations` param — the documented-but-missing knob), `world/manipulation_stage.py` (noslip passthrough).
   *Known/flagged:* pen 2/12 over the 7mm pen-gate (thin-body claw contact, independent of noslip — a genuine
   thin-object limit; 10/12 clean still ≥9); apple/tennis a couple demos at j4≈1.43 (a hair over the 1.40 target,
   from the round-roll alignment). NOT YET re-litigated: the IK/motion architecture (unchanged, as directed).
 
-- **2026-06-20 — Refinements A+B DONE & verified.** (A) Disturbance v2 (`a398a43`): random approach-timing shove
-  + sense-delay → before-close **smooth CHASE** to the moved cube (moving-object data) vs after-close **gentle
-  RETRY** (recovery data); jerk fixed (RETRY_RISE 0.20→0.10m + rise→reorient→descend decomposition → retry
-  max|dq| 0.198→0.068, global all-phase ≤0.098). Empty-close claw-claw contact allow-listed in the penetration
-  gate (same-gripper pair only; all else still counts). HDF5 attrs disturbed/disturb_phase/disturb_outcome/
-  recovery_attempts. (B) Object-refiner v2 (`6f2e59b`): multi-view COLLIDER renders saved with each asset (read
+- **2026-06-20 — Refinement B (object-refiner v2) DONE & verified.** Object-refiner v2 (`6f2e59b`): multi-view
+  COLLIDER renders saved with each asset (read
   the hulls directly; mug ring open + mouth open + body solid); keypoints/parts as VERIFIED virtual massless/
   collision-less/invisible labels (mug ring+opening, proven 0 physics perturbation); PartNet semantic naming
   verified live (bottle link_0→cap, link_1→bottle_body vs semantics.txt) + a synthetic-stapler unit test.
@@ -454,20 +395,17 @@ agent-native; subagents for context; rigorous, no hallucination.
 
 - **2026-06-20 — NO-WAIT ROOT RE-ARCHITECTURE + clean reset (the foundation fix).** *Problem:* the owner kept
   seeing the arm **idle in the air after the grasp** and trials waiting on each other. *Root cause:* the staged
-  `run_phase` A1/A2/**B**/C structure (added with disturbance-v2) is a per-phase BARRIER — in the B-retry loop
+  `run_phase` A1/A2/**B**/C structure is a per-phase BARRIER — in the B-retry loop
   every successful env HELD its lifted cube through the slowest env's retries (≈ the ~5 s mid-air idle), and each
   phase padded all envs to its own max. A grasp-solving subagent, not knowing the *hold* was the bug, then built
   a pile of machinery to fight the symptom (cradle-depth, `carry_keep_grasp_quat`, slow-close dwell). *Change:*
   (1) **reverted** all that uncommitted churn + swept the debug junk (clean reset; the documented rules kept);
-  (2) **re-architected** `tasks/pickplace.py`: the clean default (`DISTURB=0`) is now ONE continuous per-env
-  trajectory `home→pre→at→close→lift→carry→lower→release→home` in a single `run_phase` — **no barrier**; the
-  disturbance path is a per-env seg1/seg2/seg3 where a held env runs `place→home` concurrently with another env's
-  recovery (no lifted-hold); (3) **per-env natural termination** — the writer trims each env's idle-home tail →
-  **variable-length demos** (owner: "different lengths are natural"); (4) `DISTURB` now defaults to **0**
-  (disturbance is opt-in augmentation). *Result (real runs):* clean cube **8/8 grasp+place, 0 pen, max|dq|≈0.03**,
-  demo lengths **104–110** (variable, no mid-air hold); disturbance `DISTURB=0.5` **8/8 placed, 0 pen**, demo
-  lengths **140–214** — the held envs terminate ~74 recframes before the recovering ones, *each at its own home*
-  = cross-env independence proven in the data. Docs: [disturbance_recovery.md](disturbance_recovery.md) revised.
+  (2) **re-architected** `tasks/pickplace.py`: the clean default is now ONE continuous per-env
+  trajectory `home→pre→at→close→lift→carry→lower→release→home` in a single `run_phase` — **no barrier**;
+  (3) **per-env natural termination** — the writer trims each env's idle-home tail →
+  **variable-length demos** (owner: "different lengths are natural"). *Result (real runs):* clean cube **8/8
+  grasp+place, 0 pen, max|dq|≈0.03**, demo lengths **104–110** (variable, no mid-air hold) — each env terminates
+  *at its own home* = cross-env independence proven in the data.
   *Next (owner steer):* re-solve **apple / tennis / banana / pen** on this clean foundation with a SIMPLE firm
   top-down grasp — the prior "needs a dex hand" conclusion was likely the broken-foundation symptom; the owner is
   confident these are easy when the foundation is correct (RoboLab found apple the easiest). Re-evaluate from
@@ -494,9 +432,8 @@ agent-native; subagents for context; rigorous, no hallucination.
   max|dq|=0.020 (smooth); pre-grasp + lift frames visibly compact/bent (`output/temp/tiltfix_final/FINAL_*.png`).
   *Process lesson (owner, emphatic):* the original Genesis-IK-vs-SODA-IK switch was an architectural trade-off
   (grasp accuracy vs natural motion) made silently in a code comment — SURFACE trade-offs like that to the owner,
-  don't bury them. *Known follow-up:* DISTURB>0 recovery re-grasps reuse the planned tilt (2/8 briefly touch the
-  wrist limit at the shoved pose) — opt-in hard-recovery path, re-select the tilt at the shoved pose to close it.
-  Commit `b42bb96`. Next: re-collect 200 clean full-DR cube (parallel) + redo disturbance, then apple/banana/pen/tennis.
+  don't bury them.
+  Commit `b42bb96`. Next: re-collect 200 clean full-DR cube (parallel), then apple/banana/pen/tennis.
 
 - **2026-06-20 — three object improvements on the natural-motion foundation (apple native texture · DR-strategist
   owns the colour policy · deeper grasp).** All on the correct relax-tilt + noslip + LIFT=0.10 foundation;
@@ -528,32 +465,9 @@ agent-native; subagents for context; rigorous, no hallucination.
      (4.4mm) · tennis 12/12 (6.4mm) · banana 12/12 (6.7mm) · pen 12/12 (6.9mm) — all 0 abnormal, natural posture.
      **CUBE regression (E=8 real):** 8/8 placed, 0 pen (2.9mm), posture natural (|j4|≤1.40, elbow≥1.14) — byte-
      for-byte unchanged. Not committed (main agent reviews).
-- **2026-06-20 — DISTURBANCE single-continuous-pass re-architecture (the NO-HOLD fix) + FAST writes zero videos.**
-  Two task-file changes; clean path + all locked logic untouched. *(1) NO-HOLD (the load-bearing one).* The
-  disturbance path still used STAGED seg1(approach)/seg2(close+lift)/seg3(place+recover). In seg2 the NORMAL envs
-  finished close+lift early and **FROZE LIFTED IN THE AIR (~4–5 s)** while the chase envs did their longer pivot —
-  a per-env barrier the owner forbids. *Change:* re-architected to a **SINGLE continuous per-env trajectory**,
-  exactly like the clean path — each env's FULL trajectory (clean / chase / after-close-recover) is **pre-planned
-  up front** and the whole batch runs in ONE `run_phase`; a clean/chase env terminates early (shorter demo), a
-  recovering env runs longer, **no env ever freezes waiting**. *Key enabler:* to pre-plan the chase/recover
-  re-grasp BEFORE the run (no sim read), the shoved resting pose is **PREDICTED at build time** — `rest = fire_xy
-  + unit(v)·|v|²/(2·µ·g)` (Coulomb slide; we own the impulse). **Calibrated** (`scripts/temp/calib_shove_predict.py`,
-  GPU1): at `µ=0.85` the prediction matches the REAL settled xy to **~1.2 cm mean / 1.6 cm max** — inside the
-  open-claw span, so the re-grasp planned at the prediction cages the real cube. chase-vs-after-close is also
-  resolved at build time (`DisturbanceSpec.will_be_informed_before_close`, no sim read). The shove STILL fires via
-  the `during_step` hook at a per-env fire-step inside each env's own first approach (a real physics slide). Two
-  small mid-traj-hold fixes for the chase: single `at` in the first approach (the chase never closes there) + skip
-  a near-no-op re-aim reorient. **Both modes ship hold-free — the after-close mode was NOT deferred.** *Verified:*
-  **NO-HOLD checker** (`scripts/temp/check_no_hold.py`, DISTURB=0.5 E=16 seed7 real-render): worst mid-trajectory
-  static-arm run **= 6 frames** (per-demo 0–6, the pre-grasp/close settle) vs the old 40–50+ frame frozen-lift —
-  **eliminated**; the disturbed demos show the SAME tiny static profile as the clean demos. 7 disturbed → 4 chased
-  + 2 recovered = 15/16 placed, 1 failed (hard edge-of-workspace shove, correctly labelled+rejected); demo lengths
-  **95→160** (per-env natural termination); max|dq|=0.020 (smooth, no flip); **penetration 0 abnormal**; posture
-  worst |j4|=1.445 / elbow 0.961 (both from CLEAN envs; disturbed re-grasps inside). **CLEAN regression (DISTURB=0
-  E=8 seed7):** 8/8 grasp+place, 0 abnormal pen (2.7mm), max|dq|=0.020, demos 91–99 — `T=977` byte-identical to
-  before. *(2) FAST.* `FAST=1` now writes **ONLY `demos.hdf5`** + the `[COLLECT]` prints — the blank-frame
+- **2026-06-20 — FAST writes zero videos.** `FAST=1` now writes **ONLY `demos.hdf5`** + the `[COLLECT]` prints —
+  the blank-frame
   placeholder machinery (the "thin black-stripe" junk videos) is removed; the per-cam mp4s / third-person tile /
   fourview clips / distractor preview PNGs are all SKIPPED. Verified: a FAST run leaves **0 `.mp4`/`.png`** in
-  DATA_DIR + OUT_DIR. Edited only `tasks/pickplace.py` (disturbance branch + FAST write-skip) + `skills/disturbance.py`
-  (prediction + build-time resolution); docs `disturbance_recovery.md` (v3) + this entry. Not committed (main agent
+  DATA_DIR + OUT_DIR. Edited only `tasks/pickplace.py` (FAST write-skip). Not committed (main agent
   reviews/gates).

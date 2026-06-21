@@ -39,7 +39,7 @@ would replace the hand-written ranges is **future work** — the MVP advises edi
   `dr/object_dr.py`); its **workbook**; and (after a run) the per-demo **DR plan + outcomes** from the HDF5.
   **[BUILT]** the per-demo DR plan is now real — `data/demo_<i>.attrs` carries `dr_cubx/cuby/bowx/bowy/tabZ/
   yaw/mass_shift/clr/reach` + `dr_pose_scale/mass_scale/fric_scale` alongside the outcome attrs (`success/
-  penetrating/degenerate/has_distractors/disturbed/recovered/arm/seed`).
+  penetrating/degenerate/has_distractors/arm/seed`).
 - **Outputs.** (1) the selected scope-B fields + recommended ranges for this task; (2) after a run, a diagnosis
   of *which DR fields drove failures* (the per-demo DR plan makes this defensible) and an **append to the
   workbook**; (3) proposed range edits (human/main-agent applied).
@@ -98,38 +98,6 @@ and a Nyx multi-view augment render are designed but **deferred to future** (the
 - **Workbook** `.claude/workbooks/object_refiner_workbook.md` [BUILT — MVP]: category density priors + a
   per-object log (the mug entry, the geometry-probe recipe that found the handle hole, hard corners).
 
-## Disturbance + failure-recovery  — a HARNESS + god-mode recovery control  [BUILT]
-Generates **failure-and-recovery** data so the trained policy is robust. **This is NOT an LLM subagent.**
-It is a deterministic injection HARNESS (`skills/disturbance.py`) plus a god-mode recovery CONTROL in the task
-(`tasks/pickplace.py`) — the same first-principles pattern as the penetration gate and the 50/50 distractors: a
-privileged, reproducible sim mechanism the main agent *calls*, not a planner it delegates to. **Opt-in:
-`DISTURB` defaults to 0** (the default run is the clean single-trajectory pick-place). Full spec:
-[disturbance_recovery.md](disturbance_recovery.md).
-
-- **Role.** With a per-env PROBABILITY (default ~0.34, mirroring the 50/50 distractor `has_dist` pattern),
-  inject a GENTLE random in-plane shove on the TARGET cube DURING the grasp approach → the planned grasp
-  MISSES. The god-mode solver DETECTS the miss from privileged sim signals and RECOVERS by replanning.
-- **Mechanism.** `DisturbanceSpec.sample(...)` draws the disturbed envs + their (vx,vy) impulse from the stage
-  rng; `inject()` adds a small horizontal velocity on the cube's free-joint x/y dofs for the disturbed envs
-  only (BATCHED, `set_dofs_velocity(..., envs_idx=...)`), fired once via a `during_step` hook added to
-  `BatchExecutor.run` when the active arm enters the `at`/`close` window. The cube slides ~2–5 cm under
-  friction (a physical shove, no teleport) so the committed grasp closes on nothing.
-- **Detection (privileged).** `grasp_failed = (cube did NOT rise > 3 cm) OR (driven gripper near the empty-close
-  stop AND cube far from the EE)` — read straight from the cube pose + gripper joint position.
-- **Recovery (per-env, ONE attempt, NO barrier).** In the final batch each env runs its OWN continuous
-  remainder: a HELD env runs `place→home` straight away; a FAILED env runs `rise→reopen→relocate→re-grasp→
-  lift→place→home` (re-located from the sim via the LOCKED grasp/waypoint builders). Both run in the same
-  batch, so the held env executes its place→home **concurrently** with the recovery and terminates at its own
-  home — it NEVER idles in the air through the recovery (this replaced the old staged Phase-B retry loop where
-  successful envs HELD their lifted cube ≈ the owner-flagged mid-air idle). The recorded demo contains
-  failed-grasp + recovery + success — that *is* the training signal. Motion stays on the one smooth path
-  (BatchExecutor + densify); no new motion engine. Demos are variable-length (per-env natural termination).
-- **HDF5 attrs.** `disturbed` (bool), `recovered` (bool: disturbed AND placed), `recovery_attempts` (int).
-- **Why.** Clean-only data yields brittle policies; failure-recovery modes teach the policy to detect a failed
-  grasp and replan, handling the imperfect real world.
-- **Future.** Same harness generalises to other cases (cup bumped over, target shifted mid-transport) by
-  choosing a different target/trigger-phase/impulse — see disturbance_recovery.md "Future cases".
-
 ## More to come  [PLANNED]
 The framework is extensible: a task-authoring agent (masters the §1 loop), a viewpoint/camera agent, a
 scene-composition agent, etc. Each follows the same pattern — a narrow contract + a workbook → toward autonomy.
@@ -137,9 +105,9 @@ scene-composition agent, etc. Each follows the same pattern — a narrow contrac
 ---
 
 ## How agents evolve toward autonomy
-Every subagent owns a workbook. Each run produces traceable evidence (the per-demo `DRPlan`, physical outcomes,
-disturbance logs). The agent diagnoses, appends, and refines. Over many tasks the workbooks become deep
+Every subagent owns a workbook. Each run produces traceable evidence (the per-demo `DRPlan`, physical outcomes).
+The agent diagnoses, appends, and refines. Over many tasks the workbooks become deep
 playbooks; the agents need less and less human steering. The endpoint is a framework where the main agent picks
-a task and the subagents set up, randomize, refine objects, inject disturbances, collect at scale, and feed
+a task and the subagents set up, randomize, refine objects, collect at scale, and feed
 fine-tuning — autonomously. That autonomous, self-improving, data-scaling framework — not any single solved
 task — is the deliverable.

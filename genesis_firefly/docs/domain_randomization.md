@@ -158,12 +158,6 @@ table in OPEN areas, with **realistic physics + collision** (they rest, can be b
 >   displacement ≤ 1.2 cm, 100% under 2 cm, none knocked**, while parity stayed 8/8 grasped+placed, 0
 >   through-wall. Set `DIST_DEBUG=1` to print per-distractor displacement + a per-phase trace.
 
-> **Disturbance / failure-recovery is also a per-trial PROBABILITY** — exactly like the 50/50 distractors,
-> a per-env draw (`rng.rand(N) < prob`, default ~0.34) decides whether the TARGET cube gets a gentle in-plane
-> shove during the grasp so the grasp fails and the god-mode solver must recover. It is a separate HARNESS
-> (`skills/disturbance.py`) staged into the task, not a DR field; see
-> [disturbance_recovery.md](disturbance_recovery.md). `DISTURB=0` forces it off.
-
 ## Scope C — Visual background  (AUTOMATIC for every task)
 
 | field | what | range | variability |

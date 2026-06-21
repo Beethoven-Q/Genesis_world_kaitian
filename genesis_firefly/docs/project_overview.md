@@ -54,12 +54,10 @@ simulator with **RTX-grade Nyx** photoreal rendering, then generalizes it into t
   An env must NEVER idle/hold waiting for other envs — not mid-air, not at home, not in sim-behaviour, not in the
   recorded data/video. (1) NO STAGED global barrier (e.g. "all envs finish the pick phase, then all place") —
   that makes early finishers hold the lifted object in the air = forbidden mid-air idle. Each env runs its OWN
-  continuous trajectory `approach→place→home` (disturbance just makes that one env's trajectory LONGER at its own
-  moment: pivot-to-chase, or fail→rise→retry). (2) When an env reaches home its TRIAL IS DONE → its data + video
+  continuous trajectory `approach→place→home`. (2) When an env reaches home its TRIAL IS DONE → its data + video
   **TERMINATE there**. The batched sim still steps the finished env (others aren't done), but it is NOT RECORDED
   — no idle-home frames. **Demos are VARIABLE-LENGTH and that is natural + accepted.** No padding, no waiting, no
-  idle anywhere. (The disturbance chase-vs-fail outcome is fixed at build time via the fire-band, so each env's
-  full path is known/extends per-env — no runtime barrier needed.)
+  idle anywhere.
 - **Maintain `docs/roadmap.md`** — a living problem→change→why→result log. Append a dated entry whenever you fix
   a real problem, change a contract, or make a non-obvious decision. This is how we trace back what we did.
 - **2×2 four-view preview tile** for every collection (see §7). **Storage:** smoke → `output/`; full collections
@@ -100,8 +98,8 @@ deployable on the real robot (where SODA's analytic IK runs natively, but the po
 
 **Physical success filtering.** Success is judged by *physical outcome* (object lifted ≥ threshold, came to rest
 in the bowl, clear of the gripper), NEVER by "the IK/motion command succeeded." A command can succeed while the
-object fails the task. Failed trials are still valuable (debugging, and — via the disturbance agent — explicit
-failure-recovery data), but the first fine-tune dataset is `success_only`.
+object fails the task. Failed trials are still valuable (debugging), but the first fine-tune dataset is
+`success_only`.
 
 **The task-solving loop** (what the main agent masters, per task):
 1. build the sim scene with real assets; 2. write a privileged scripted solver using all useful sim state;
@@ -154,11 +152,10 @@ The main agent never re-derives infrastructure; it *calls* harnesses:
 - **Grasp skill** (`skills/grasp.py`): the orientation-aware grasp primitives PLUS the higher-level per-env grasp/
   carry ORIENTATION + WRIST-MARGIN relax-tilt PLANNING — `grasp_quat_at` / `cquat` (the grasp/carry quat builders,
   cube-π/2 vs elongated-π symmetry fold) and `select_grasp_tilt` / `select_place_tilt` (prefer top-down, relax to
-  the smallest forward tilt keeping the wrist off its limit & the elbow bent through the binding frames), with `*_at`
-  variants for the disturbance re-grasp. These were extracted out of `tasks/pickplace.py`'s `collect()` (where they
+  the smallest forward tilt keeping the wrist off its limit & the elbow bent through the binding frames). These were
+  extracted out of `tasks/pickplace.py`'s `collect()` (where they
   were closures) into PURE functions over an immutable **`GraspContext`** (the per-collect bundle, built once) plus
-  an explicit `solve`/`gqA` — so any task gets the SAME natural-posture planning with no copy-paste fork. The task's
-  disturbance trajectory ASSEMBLY stays in `pickplace.py` and just calls these planners.
+  an explicit `solve`/`gqA` — so any task gets the SAME natural-posture planning with no copy-paste fork.
 - **Full-DR harness** (`dr/`, + the DR subagent): encodes the *complete* DR spec once and applies it. See §4.
 - **Dexterity-aware IK** (`robots/ik.py` + `skills/pick_place.py`): Genesis-native sub-mm IK targeting the tool
   frame, wrapped by `reachable_grasp_quat`/`reachable_place_quat` (prefer top-down, relax to the smallest tilt
@@ -204,11 +201,6 @@ The framework is **extensible** — new harnesses/agents slot in. Planned next:
   drawer handle) into `ObjectSpec.keypoints` for skills like the virtual-EE, and run a **collision audit**:
   hollow parts stay hollow (convex-**DECOMPOSITION**, not a single filling hull), solid parts never interpenetrate
   under firm grip. Output: a realistic, keypoint-annotated, collision-correct object the registry can use.
-- **Disturbance agent** — injects **failure cases during the main agent's execution** so the data contains
-  **failure-and-recovery** modes (which makes the trained policy robust): nudge the object as the arm reaches to
-  grasp (did the grasp succeed? regrasp if missed), knock the object over, shift the target mid-transport. The
-  main agent must *detect* the failure from privileged state and *recover*. A `DisturbanceSpec` is injected at a
-  scheduled step in the executor.
 - **More to come** — e.g. a task-authoring agent that masters the §1 loop end-to-end, a camera/viewpoint agent,
   a scene-composition agent. Each new agent follows the same pattern: a narrow contract + a workbook that
   accumulates experience → trends to autonomy.
@@ -299,7 +291,7 @@ dataio/                hdf5_writer.py · lerobot_exporter.py
 runner/       collect.py (one build) · orchestrate.py (B subprocess builds → merge shards)
 assets/       robots/ · objects/ · textures/ (≥10 table textures) · backgrounds (HDRI pool)
 docs/         project_overview.md (this) · domain_randomization.md · agents.md · manipulation_stage.md · …
-.claude/agents/      dr-strategist.md · object-refiner.md · disturbance-designer.md
+.claude/agents/      dr-strategist.md · object-refiner.md
 .claude/workbooks/   dr_workbook.md
 ```
 
@@ -320,7 +312,7 @@ Scopes A (scene) + C (visual) + photoreal + parallel + collision + dexterous IK 
   near-clip fix, smooth `BatchExecutor`, this blueprint + the full DR spec.
 - **In progress:** dexterity-aware fix for jerk near full extension (route through `plan_pick_place` + dexterity
   guard + workspace-aware poses); the `dr/` full-DR harness + per-demo `DRPlan`; `runner/orchestrate.py`
-  build-batches; the DR subagent + workbook; the object-refiner + disturbance agents; the virtual-EE skill +
+  build-batches; the DR subagent + workbook; the object-refiner agent; the virtual-EE skill +
   `ObjectSpec.keypoints`; a 2nd task (mug-hang / pour) to prove generalization with no harness edits; LeRobot
   export + a first pi0.5 fine-tune of Genesis data.
 ```

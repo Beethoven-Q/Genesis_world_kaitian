@@ -40,7 +40,7 @@ arm/gripper/camera colliders, self-collision on, firm Newton solver — see the 
 ## Docs
 | doc | what it covers |
 |-----|----------------|
-| [project_overview.md](project_overview.md) | **The big blueprint** — mission, the end-to-end sim-to-real pipeline, SETUP-vs-TASK, the harnesses, the DR subagent + near-future agents (object-refiner, disturbance), the virtual-EE skill, build-batch parallelism, data contract, repo layout, and how to add a task. **Read this first.** |
+| [project_overview.md](project_overview.md) | **The big blueprint** — mission, the end-to-end sim-to-real pipeline, SETUP-vs-TASK, the harnesses, the DR subagent + near-future agents (object-refiner), the virtual-EE skill, build-batch parallelism, data contract, repo layout, and how to add a task. **Read this first.** |
 | [domain_randomization.md](domain_randomization.md) | **The complete full-DR spec** for EVERY task — scopes A (scene), B (object/task), C (visual); the per-build vs per-env renderer constraint; pose anti-coupling rules. The authoritative DR reference. |
 | [manipulation_stage.md](manipulation_stage.md) | **The reusable setup** — what it provides, the full API, and a copy-paste template for a new task. |
 | [rendering_and_livery.md](rendering_and_livery.md) | Nyx photoreal rendering, immersive per-env HDRI DR, the matte override, the livery bakers, and every Nyx gotcha. |

@@ -59,7 +59,7 @@ The **same task** picks-and-places **any registry object** as the grasp target. 
 it; the default is `cube`, so `pickplace.py N seed` reproduces the cube collection **exactly** (the regression
 gate: `TARGET=cube pickplace.py 8 7` → 8/8 grasp+place, 0 penetration, max|dq|=0.068, byte-for-byte). Switching
 the target is a **small per-object adaptation, not a fork** — the orientation-aware grasp, the full DR, the 50/50
-distractors, the disturbance harness, the penetration gate, and go-home are **all reused unchanged**.
+distractors, the penetration gate, and go-home are **all reused unchanged**.
 
 ```bash
 TARGET=banana CUDA_VISIBLE_DEVICES=0 ./.venv/bin/python genesis_firefly/tasks/pickplace.py 20 7
@@ -84,9 +84,7 @@ in the run loop (~6× faster) AND skips ALL video/tile/montage/preview writing �
 (the numeric data the posture/penetration checks read) + the `[COLLECT]` prints, **no `.mp4`/`.png` at all** (the
 old FAST wrote blank "black-stripe" placeholder videos; that is gone — never use FAST for a real collection, it
 produces no policy videos). `GRASP_DZ`/`CLOSE_G`/`TGT_FRIC`/`TGT_SINGLE_HULL`/`TGT_DECOMP` override the per-object
-grasp params, `SHOVE_MU` overrides the disturbance shoved-pose prediction friction (default 0.85, calibrated),
-`DISTURB_DIAG=1` prints predicted-vs-actual shoved pose per disturbed env, `PEN_TRACE=1` prints the worst-ever
-penetration per phase.
+grasp params, `PEN_TRACE=1` prints the worst-ever penetration per phase.
 
 ### 1a-ter. Per-object status (2026-06-20)
 
