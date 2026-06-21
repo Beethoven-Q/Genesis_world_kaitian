@@ -29,8 +29,14 @@ from world.manipulation_stage import ManipulationStage, np_   # the reusable set
 from world.firefly_scene import BOWL_HALF_H  # noqa: E402
 from robots.firefly_dual import GR100_OPEN, GR100_CLOSE, GR100_MIMIC  # noqa: E402
 from robots.ik import TOOL_IN_EE_INV, tool_R_at_home  # noqa: E402
-from skills.grasp import (world_long_axis, orientation_aware_grasp_quat, tilted_base_quat,
-                          transport_quats, _R_from_wxyz, _wxyz_from_R)  # noqa: E402
+# low-level grasp PRIMITIVES still used directly by the task (the IK tool<->ee frame maps + the pick waypoint
+# builders); the orientation-aware quat / relax-tilt PLANNING that consumed the others moved into skills/grasp.py.
+from skills.grasp import _R_from_wxyz, _wxyz_from_R  # noqa: E402
+# Higher-level grasp ORIENTATION / WRIST-MARGIN PLANNING (agent-native modularity 2/3): the per-env grasp/carry
+# quat builders + the RoboLab-faithful relax-tilt selection were extracted out of collect() into skills/grasp.py
+# as PURE functions over a ``GraspContext`` (built once below). collect() builds the context + calls them 1:1;
+# the DISTURBANCE waypoint assembly stays here and just CALLS grasp.grasp_quat_at / select_*_tilt_at.
+import skills.grasp as grasp  # noqa: E402
 from skills.executor import BatchExecutor  # the ONE smooth motion path (densify + batch IK)  # noqa: E402
 from skills.penetration import PenetrationTracker, ABNORMAL_THRESH_M  # the #1 collision gate  # noqa: E402
 from skills.disturbance import DisturbanceSpec  # gentle target-shove harness -> failure-recovery data  # noqa: E402
@@ -497,17 +503,10 @@ def collect(N, seed, data_dir, out_dir, target=None):
     # the GRASP centre for the settled object (root0 stays the raw root for the degenerate guard + scoring + rest_z)
     groot0 = grasp_center_world(root0, np_(cube.get_quat()))
 
-    # NOTE: the orientation-aware GRASP quat is built by ``grasp_quat_at(i, cx, cy)`` below (used both for the
-    # first grasp AND the recovery re-grasp at the cube's relocated pose); ``cquat`` builds the carry/place quat.
-    def cquat(i, gqi, tilt_deg=8.0):
-        """Carry/place orientation for env i: a base tilted ``tilt_deg`` toward the BOWL reach direction,
-        re-yawed (transport_quats) to the branch closest to the grasp orientation ``gqi`` (smooth wrist).
-        ``tilt_deg`` defaults to 8 (the locked gentle tilt); ``select_place_tilt`` relaxes it per-env when a
-        higher carry-over-bowl pose would otherwise SATURATE the wrist (RoboLab reachable_place_quat policy,
-        extended with the wrist margin -- the carry over the bowl is the OTHER frame that over-stretches)."""
-        s = "left" if side_is_left[i] else "right"
-        return transport_quats(tilted_base_quat(np.array([bowx[i], bowy[i]]) - base[s], float(tilt_deg)),
-                               reference_quat=gqi)[0]
+    # NOTE: the orientation-aware GRASP quat is built by ``grasp.grasp_quat_at(ctx, i, cx, cy)`` (skills/grasp.py;
+    # used both for the first grasp AND the recovery re-grasp at the cube's relocated pose); ``grasp.cquat`` builds
+    # the carry/place quat. These (+ the wrist-margin relax-tilt selection) were extracted into skills/grasp.py as
+    # pure functions over a ``GraspContext`` built once below; collect() calls them 1:1.
 
     def ik(link, tool_pos, tool_quat):
         Rt = np.stack([_R_from_wxyz(q) for q in tool_quat])
@@ -571,39 +570,6 @@ def collect(N, seed, data_dir, out_dir, target=None):
         hp, hq = ee_to_tool(hposL[i], hquatL[i]) if side_is_left[i] else ee_to_tool(hposR[i], hquatR[i])
         home_tool[i], home_tquat[i] = hp, hq
 
-    def grasp_quat_at(i, cx, cy, tilt_deg=0.0):
-        """The orientation-aware grasp quat for env i with the cube at (cx,cy) -- reuses the LOCKED grasp
-        builders (yaw-folded for the cube, tilt base toward the cube). Used both for the first grasp and to
-        RE-PLAN the recovery grasp at the cube's NEW (shoved) location.
-
-        ``tilt_deg`` (default 0 = pure top-down) tilts the approach axis AWAY from straight-down TOWARD the
-        reach direction (cube - arm base), EXACTLY as RoboLab's ``reachable_grasp_quat`` relax-tilt does. A
-        small forward tilt keeps the WRIST off its limit + the ELBOW bent through the lift in this LOW (table-
-        at-base-level) workspace where a pure top-down lift is near-singular. The per-env tilt is chosen by
-        ``select_grasp_tilt`` below (prefer top-down; relax to the smallest tilt that stays wrist-comfortable)."""
-        s = "left" if side_is_left[i] else "right"
-        # Fold the in-plane yaw into the object's SYMMETRY wedge before building the reference axis. The CUBE is
-        # 4-fold symmetric (a face repeats every 90deg) -> fold to [-45,45]. An ELONGATED object (banana/pen) is
-        # only 2-fold symmetric about its LONG axis (the line repeats every 180deg) -> fold to [-90,90]; folding
-        # it into the cube's 45deg wedge computed the grasp for the WRONG axis and the claws MISSED the banana at
-        # |yaw|>45 (verified: collector banana failures were exactly the large-|yaw| envs). A ROUND object has no
-        # axis (laxis is None) so the fold is irrelevant. fold = pi/2 (cube) or pi (elongated).
-        fold = (np.pi / 2) if spec.is_cube else np.pi
-        yr = ((yaw[i] + fold / 2) % fold) - fold / 2
-        qzr = np.array([np.cos(yr / 2), 0.0, 0.0, np.sin(yr / 2)])
-        base_q = tilted_base_quat(np.array([cx, cy]) - base[s], float(tilt_deg))
-        gq = orientation_aware_grasp_quat(world_long_axis(laxis, qzr), base_q, reference_R=htR[s])
-        if laxis is None:
-            # ROUND object (no preferred grasp axis): the wrist ROLL is FREE, so orientation_aware_grasp_quat
-            # returned base_q WITHOUT aligning the roll. Left free, the roll varies with the reach direction and
-            # can land ~pi from the HOME wrist roll -> the carry inherits it and the go_home then FLIPS joint_6
-            # (a ~3rad snap on the empty return, verified on 3/12 apple demos). Snap the round grasp roll to the
-            # branch CLOSEST to the home wrist orientation (same branch-pick transport_quats uses), so the whole
-            # pick->carry->home chain stays near the home roll and joint_6 never flips. (No-op for cube/elongated,
-            # whose roll is already determined by their ref axis -> their motion is unchanged.)
-            gq = transport_quats(gq, reference_quat=_wxyz_from_R(htR[s]))[0]
-        return gq
-
     # ---- WRIST-MARGIN-AWARE grasp tilt selection (the RoboLab-faithful natural-posture fix) -------------------
     # WHY: RoboLab's pick-place is NATURAL because ``plan_pick_place`` PREFERS top-down but RELAXES to the
     # smallest tilt (toward the reach direction) that the arm can reach -- ``reachable_grasp_quat`` +
@@ -628,48 +594,15 @@ def collect(N, seed, data_dir, out_dir, target=None):
     WRIST_MARGIN = float(os.environ.get("WRIST_MARGIN", "0.17"))   # keep |j4| <= 1.40 -> >=0.17 off the limit
     ELBOW_MIN = float(os.environ.get("ELBOW_MIN", "1.05"))   # keep j3(elbow) >= this (bent; home 2.30, limit [0,3.14])
 
-    def _posture_at_pick(tilt_deg):
-        """Batched: for the given per-env grasp tilt, return (grasp_quat, worst |j4| wrist, worst-low j3 elbow)
-        over the PICK's binding frames -- the PRE-GRASP (a reached-out approach) and the LIFT -- on the
-        EXECUTION-FAITHFUL warm-start chain. The executor reaches the lift by tracking CONTINUOUSLY from the
-        grasp/close config UP the +Z column (warm-started single-sample IK), so the lift lands on the branch
-        C1-continuous from the grasp -- NOT the globally-best branch a cold solve from home would pick. We
-        replicate that (pre-grasp warm from home as the run starts, then grasp, then lift warm from grasp), so
-        the predicted j4/j3 match the demo (a cold solve under-predicts the over-stretch + stops relaxing early).
-        A forward tilt BOTH unsaturates the wrist AND bends the elbow, so one relax ladder satisfies both."""
-        gq = np.stack([grasp_quat_at(i, gc[i, 0], gc[i, 1], tilt_deg[i]) for i in range(N)]).astype(np.float64)
-        tz = np.stack([_R_from_wxyz(q) @ np.array([0, 0, 1.0]) for q in gq])   # per-env approach axis (ee +Z)
-        pre_tool = gc - APP * tz                           # the PRE-GRASP waypoint (back off along approach axis)
-        lift_tool = gc.copy(); lift_tool[:, 2] += LIFT     # the lift waypoint the collector actually commands
-        qpre = solve(pre_tool, gq)                         # PRE-GRASP solve (warm from home, as the run starts)
-        solve(gc.copy(), gq)                               # GRASP solve -> warms the IK at the grasp config
-        qlift = solve(lift_tool, gq)                       # LIFT solve, continuous from the grasp branch
-        j4 = np.maximum(np.abs(qpre[:, 3]), np.abs(qlift[:, 3]))   # worst wrist over the pick
-        j3 = np.minimum(qpre[:, 2], qlift[:, 2])                   # worst-low elbow over the pick
-        return gq, j4, j3
-
-    def select_grasp_tilt():
-        """Per-env grasp tilt: the SMALLEST of ``_GRASP_TILT_STEPS_DEG`` whose pick keeps the wrist OFF its limit
-        (|j4| <= WRIST_LIMIT-WRIST_MARGIN) AND the elbow BENT (j3 >= ELBOW_MIN) through the pre-grasp + lift.
-        Returns (tilt_deg:(N,), grasp_quat:(N,4)). Starts every env at top-down (0) and only relaxes the envs
-        that still over-stretch -- so a comfortable env keeps the cleanest pure-vertical grasp, and only the
-        over-stretched envs tilt forward (exactly RoboLab's minimal-tilt policy)."""
-        tilt = np.zeros(N)
-        gq, j4, j3 = _posture_at_pick(tilt)
-        need = (j4 > (WRIST_LIMIT - WRIST_MARGIN)) | (j3 < ELBOW_MIN)   # wrist saturating OR elbow too straight
-        for t in _GRASP_TILT_STEPS_DEG[1:]:
-            if not need.any():
-                break
-            tilt[need] = t
-            gq_t, j4_t, j3_t = _posture_at_pick(tilt)
-            gq[need] = gq_t[need]                           # adopt the relaxed-tilt quat for the still-needy envs
-            j4[need] = j4_t[need]; j3[need] = j3_t[need]
-            need = (j4 > (WRIST_LIMIT - WRIST_MARGIN)) | (j3 < ELBOW_MIN)   # re-test; the rest are already OK
-        print(f"[COLLECT] grasp tilt (RoboLab relax, wrist-margin {WRIST_MARGIN:.2f}, elbow>={ELBOW_MIN:.2f}, "
-              f"lift={LIFT}): per-env deg={np.round(tilt, 0).astype(int).tolist()} ; "
-              f"predicted pick wrist|j4|max={float(j4.max()):.3f} elbow|j3|min={float(j3.min()):.3f} "
-              f"(still-over-stretched={int(need.sum())})", flush=True)
-        return tilt, gq.astype(np.float64)
+    # ---- GRASP-PLANNING CONTEXT (agent-native modularity 2/3): the immutable per-collect bundle the
+    # extracted grasp-orientation / wrist-margin PLANNING functions (skills/grasp.py) need. Built ONCE here from
+    # this collect()'s locals; ``grasp.grasp_quat_at`` / ``grasp.select_grasp_tilt`` / ``grasp.select_place_tilt``
+    # (+ the *_at recovery variants) are PURE functions over it (the de-closure). The working ``solve`` callable
+    # and the mutated grasp quats ``gqA`` are passed explicitly to each call (NOT frozen into the context).
+    gctx = grasp.GraspContext(N=N, side_is_left=side_is_left, base=base, htR=htR, laxis=laxis, spec=spec, yaw=yaw,
+                              gc=gc, bxyz=bxyz, bowx=bowx, bowy=bowy, APP=APP, LIFT=LIFT, PAPP=PAPP,
+                              tilt_steps=_GRASP_TILT_STEPS_DEG, WRIST_LIMIT=WRIST_LIMIT, WRIST_MARGIN=WRIST_MARGIN,
+                              ELBOW_MIN=ELBOW_MIN)
 
     # NOTE: the per-env SPARSE pick waypoints (pre->at->at->close->lift) are built inline below by the staged
     # phases A1 (approach, open) + A2 (close/lift or chase) and by ``approach_close_lift_wps`` (chase + retry),
@@ -824,7 +757,7 @@ def collect(N, seed, data_dir, out_dir, target=None):
         reorient is a moderate <=~24deg tilt change, well inside one branch -- verified by the all-phase dq gate)."""
         gci = np.array([cx, cy, cube_rest_z[env_i] + grasp_dz])
         tlt = float(grasp_tilt[env_i] if regrasp_tilt is None else regrasp_tilt)
-        gqi = grasp_quat_at(env_i, cx, cy, tlt)                 # re-selected wrist-margin tilt at the shoved pose
+        gqi = grasp.grasp_quat_at(gctx, env_i, cx, cy, tlt)     # re-selected wrist-margin tilt at the shoved pose
         tzi = _R_from_wxyz(gqi) @ np.array([0, 0, 1.0])
         # CAP the apex: rise only enough above the cube to clear it for the re-descend (RETRY_RISE), but never so
         # high that the EE climbs into the wrist-saturation band. The apex tool-z is capped at the cube grasp z +
@@ -865,11 +798,11 @@ def collect(N, seed, data_dir, out_dir, target=None):
     # Per-env grasp orientation: prefer top-down, relax to the smallest forward tilt that keeps the WRIST off
     # its limit through the LIFT (the RoboLab-faithful natural-posture fix; ``select_grasp_tilt`` above). The
     # chosen per-env tilt is kept so the disturbance chase/retry re-grasps reuse it (stay natural too).
-    grasp_tilt, gqA = select_grasp_tilt()
+    grasp_tilt, gqA = grasp.select_grasp_tilt(gctx, solve)
     # rebuild gqA at the settled grasp CENTRE (groot0) with the chosen tilt -- select_grasp_tilt built it at gc
     # (== groot0 + grasp_dz in xy, identical xy), so this just re-keys to groot0's xy for the cube (no-op for
     # the cube where grasp_dz has no xy component; faithful for an offset banana whose gc xy differs from root).
-    gqA = np.stack([grasp_quat_at(i, groot0[i, 0], groot0[i, 1], grasp_tilt[i]) for i in range(N)]).astype(np.float64)
+    gqA = np.stack([grasp.grasp_quat_at(gctx, i, groot0[i, 0], groot0[i, 1], grasp_tilt[i]) for i in range(N)]).astype(np.float64)
 
     # ---- WRIST-MARGIN-AWARE carry/place tilt (the SAME natural-posture fix, for the OTHER binding frame) ----
     # The carry HOVERS over the bowl at ``bxyz + PAPP`` -- a HIGH EE pose (the bowl sits on the same low table
@@ -880,32 +813,10 @@ def collect(N, seed, data_dir, out_dir, target=None):
     # relax minimal tilt), extended with the explicit wrist margin. Per-env scalar, evaluated once on the
     # batched IK (no solver change). Smoothness is preserved: transport_quats still picks the carry branch
     # CLOSEST to the grasp orientation, so the lift->carry re-yaw stays a small rotation.
-    def _carry_posture(tilt):
-        """Batched carry-over-bowl wrist + elbow for a per-env carry tilt, on the execution-faithful warm chain
-        (warm at the in-bowl config, then the over-bowl hover -- the executor reaches the hover via the carry)."""
-        over_bowl = bxyz.copy(); over_bowl[:, 2] += PAPP        # the carry hover the collector commands
-        cq = np.stack([cquat(i, gqA[i], tilt[i]) for i in range(N)]).astype(np.float64)
-        solve(bxyz.copy(), cq)                                  # warm the IK at the lowered-in-bowl config first
-        q = solve(over_bowl, cq)
-        return cq, np.abs(q[:, 3]), q[:, 2]                     # carry quat, |wrist j4|, elbow j3
-
-    def select_place_tilt():
-        tilt = np.full(N, 8.0)                                  # the locked gentle carry tilt (top-down-ish)
-        cq, j4, j3 = _carry_posture(tilt)
-        need = (j4 > (WRIST_LIMIT - WRIST_MARGIN)) | (j3 < ELBOW_MIN)
-        for t in (16.0, 24.0, 32.0, 40.0):                     # relax toward the bowl (prefer the small tilt)
-            if not need.any():
-                break
-            tilt[need] = t
-            cq_t, j4_t, j3_t = _carry_posture(tilt)
-            cq[need] = cq_t[need]; j4[need] = j4_t[need]; j3[need] = j3_t[need]
-            need = (j4 > (WRIST_LIMIT - WRIST_MARGIN)) | (j3 < ELBOW_MIN)
-        print(f"[COLLECT] place tilt (RoboLab relax, wrist-margin {WRIST_MARGIN:.2f}, elbow>={ELBOW_MIN:.2f}): "
-              f"per-env deg={np.round(tilt, 0).astype(int).tolist()} ; "
-              f"predicted carry wrist|j4|max={float(j4.max()):.3f} elbow|j3|min={float(j3.min()):.3f} "
-              f"(still-over-stretched={int(need.sum())})", flush=True)
-        return tilt
-    place_tilt = select_place_tilt()
+    # ``grasp.select_place_tilt`` (skills/grasp.py) is the extracted carry/place wrist-margin relax ladder (the
+    # ``_carry_posture`` probe is its private helper there). gqA is passed explicitly (it is mutated by the
+    # disturbance path AFTER this call, so it must NOT be frozen into the context).
+    place_tilt = grasp.select_place_tilt(gctx, solve, gqA)
 
     # ---- TASK 0: RE-SELECT the grasp/place tilt AT the SHOVED cube pose for the disturbance chase/recovery -----
     # The chase (seg2) + recovery (seg3) re-grasp the cube at its NEW (shoved) pose. Reusing the ORIGINAL
@@ -914,57 +825,9 @@ def collect(N, seed, data_dir, out_dir, target=None):
     # (same WRIST_LIMIT/WRIST_MARGIN/ELBOW_MIN, same warm-start pre+lift / carry probe -- the SCORING is
     # unchanged) at the shoved grasp centre / re-grasp orientation, per env. These are single-env wrappers around
     # the same batched ``solve()`` probe used by select_grasp_tilt/_carry_posture (no IK-solver change, the
-    # relax policy is identical), so the re-grasp stays as natural as the first grasp.
-    def _posture_at_pick_env(env_i, gci, tilt_deg, apex_z=None):
-        """Single-env (gq, |j4|, j3) over the PICK binding frames at grasp centre ``gci`` and the given tilt -- the
-        env_i row of ``_posture_at_pick``, so the SCORING is byte-identical. ``apex_z`` (the recovery rise apex
-        height): the recovery/chase re-grasp does rise->REORIENT-at-apex->descend->close->lift, so the high apex
-        REORIENT (top-down at high EEz) is ALSO a binding frame that can saturate the wrist (the same high-EE
-        saturation the lift fix addressed). When given, the apex pose at ``gqi`` is folded into the worst-case so
-        the relax ladder picks a tilt comfortable AT THE APEX too -- otherwise the probe (pre+lift only) approves
-        a tilt that the recovery's apex reorient still saturates (the 2026-06-20 recovered-demo j4=1.57 bug)."""
-        gq = grasp_quat_at(env_i, gci[0], gci[1], float(tilt_deg)).astype(np.float64)
-        tz = _R_from_wxyz(gq) @ np.array([0, 0, 1.0])
-        gcN = np.tile(np.asarray(gci, float), (N, 1))          # broadcast to the batched solve (we read row env_i)
-        gqN = np.tile(gq, (N, 1))
-        pre = gcN.copy(); pre -= APP * tz
-        lift = gcN.copy(); lift[:, 2] += LIFT
-        qpre = solve(pre, gqN); solve(gcN.copy(), gqN); qlift = solve(lift, gqN)   # warm pre->grasp->lift chain
-        j4 = max(abs(float(qpre[env_i, 3])), abs(float(qlift[env_i, 3])))
-        j3 = min(float(qpre[env_i, 2]), float(qlift[env_i, 2]))
-        if apex_z is not None:                                  # the recovery rise+reorient apex (high EE) frame
-            # the recovery does reorient@apex -> descend(pre) -> at(gci). The wrist trajectory along the steep
-            # descent is NON-monotonic and can PEAK between the (checked) apex/pre endpoints, so we also probe a
-            # couple of DESCENT samples (apex, 2/3-down, pre) at gq -- the worst of these binds the relax ladder.
-            apexN = gcN.copy(); apexN[:, 2] = float(apex_z)
-            mid = 0.5 * (apexN + pre)                           # apex->pre descent midpoint (the real recovery path)
-            for wp_ in (apexN, mid, pre):                       # warm chain apex -> mid -> pre (the real descent)
-                qd = solve(wp_, gqN)
-                j4 = max(j4, abs(float(qd[env_i, 3])))
-                j3 = min(j3, float(qd[env_i, 2]))
-        return gq, j4, j3
-
-    def select_grasp_tilt_at(env_i, gci, apex_z=None):
-        """Smallest of _GRASP_TILT_STEPS_DEG keeping |j4|<=limit-margin AND j3>=ELBOW_MIN through the pick at the
-        SHOVED grasp centre ``gci`` -- the per-env relax ladder of ``select_grasp_tilt`` (identical thresholds).
-        ``apex_z`` folds the recovery/chase rise-apex reorient into the worst-case (see _posture_at_pick_env)."""
-        for t in _GRASP_TILT_STEPS_DEG:
-            _, j4, j3 = _posture_at_pick_env(env_i, gci, t, apex_z=apex_z)
-            if (j4 <= (WRIST_LIMIT - WRIST_MARGIN)) and (j3 >= ELBOW_MIN):
-                return float(t)
-        return float(_GRASP_TILT_STEPS_DEG[-1])                 # none fully clears -> the largest (most-relaxed) tilt
-
-    def select_place_tilt_at(env_i, gqi):
-        """Smallest carry tilt keeping the carry-over-bowl wrist/elbow comfortable at the re-grasp orientation
-        ``gqi`` (the carry quat re-yaws to gqi's branch) -- the per-env ladder of ``select_place_tilt``."""
-        over_bowl = bxyz.copy(); over_bowl[:, 2] += PAPP
-        for t in (8.0, 16.0, 24.0, 32.0, 40.0):
-            cqi = cquat(env_i, gqi, float(t))
-            cqN = np.tile(cqi, (N, 1)).astype(np.float64)
-            solve(bxyz.copy(), cqN); q = solve(over_bowl, cqN)
-            if (abs(float(q[env_i, 3])) <= (WRIST_LIMIT - WRIST_MARGIN)) and (float(q[env_i, 2]) >= ELBOW_MIN):
-                return float(t)
-        return 40.0
+    # relax policy is identical), so the re-grasp stays as natural as the first grasp. ``grasp.select_grasp_tilt_at``
+    # / ``grasp.select_place_tilt_at`` (skills/grasp.py; their ``_posture_at_pick_env`` probe is a private helper
+    # there) are the extracted single-env relax ladders -- called per disturbed env in the trajectory assembly below.
 
     def pick_wps(i):
         """home -> pre -> at -> at -> close -> lift for env i: the orientation-aware top-down approach + a FIRM
@@ -1007,7 +870,7 @@ def collect(N, seed, data_dir, out_dir, target=None):
         bowl, lower in, release, retract, GO HOME. This is APPENDED to the same continuous per-env waypoint stream
         (the pick, or a recovery re-grasp) so each env runs pick->place->home as ONE smooth trajectory and
         TERMINATES at home -- no staged barrier, no mid-air wait for other envs."""
-        cqi = cquat(i, gqi, place_tilt[i])                        # wrist-margin-aware carry tilt (natural posture)
+        cqi = grasp.cquat(gctx, i, gqi, place_tilt[i])            # wrist-margin-aware carry tilt (natural posture)
         return [
             ("lift",    liftp + [0, 0, 0.02],   cqi, CLOSE),       # small settle + re-yaw to the carry orientation
             ("carry",   bxyz[i] + [0, 0, PAPP], cqi, CLOSE),
@@ -1098,7 +961,7 @@ def collect(N, seed, data_dir, out_dir, target=None):
             # rise apex above the OLD pose, capped to the predicted-grasp z + RETRY_RISE (matches the builder cap)
             sp = old_p.copy(); sp[2] = max(old_p[2], cube_rest_z[i] + grasp_dz) + RETRY_RISE
             apex_z = min(float(sp[2]), float(gci_pred[2]) + RETRY_RISE)
-            rt = select_grasp_tilt_at(i, gci_pred, apex_z=apex_z)    # natural posture at the predicted shoved pose
+            rt = grasp.select_grasp_tilt_at(gctx, solve, i, gci_pred, apex_z=apex_z)  # natural posture at the predicted shoved pose
             if chased[i]:
                 # CHASE: the first approach reaches the old pose but NEVER closes (gripper stays OPEN through it);
                 # immediately re-aim to the predicted pose and close THERE. The first approach uses a SINGLE "at"
@@ -1130,7 +993,7 @@ def collect(N, seed, data_dir, out_dir, target=None):
                 # gripper open while moving up -- the reopen rides the rise, never a static frozen-apex dwell.
                 wp = empty_pick + regrasp[1:]
             gqA[i] = gqi
-            place_tilt[i] = select_place_tilt_at(i, gqi)          # carry tilt at the new (predicted) grasp quat
+            place_tilt[i] = grasp.select_place_tilt_at(gctx, solve, i, gqi)  # carry tilt at the new (predicted) grasp quat
             full_wps.append(wp + place_tail(i, wp[-1][1], gqi))   # wp[-1] = the re-grasp's final ("lift", pos, ..)
             if os.environ.get("TILT_DEBUG"):
                 tag = "chase" if chased[i] else "recover"

@@ -151,6 +151,14 @@ The main agent never re-derives infrastructure; it *calls* harnesses:
   and gets the SAME verified collision + recognizable-texture behaviour with no copy-paste fork. (Object SPAWN +
   TEXTURE was extracted out of `tasks/pickplace.py` here so objects are standalone + reusable; the task keeps only
   its layout-specific distractor *placement* samplers, which it passes into `spawn_distractors`.)
+- **Grasp skill** (`skills/grasp.py`): the orientation-aware grasp primitives PLUS the higher-level per-env grasp/
+  carry ORIENTATION + WRIST-MARGIN relax-tilt PLANNING — `grasp_quat_at` / `cquat` (the grasp/carry quat builders,
+  cube-π/2 vs elongated-π symmetry fold) and `select_grasp_tilt` / `select_place_tilt` (prefer top-down, relax to
+  the smallest forward tilt keeping the wrist off its limit & the elbow bent through the binding frames), with `*_at`
+  variants for the disturbance re-grasp. These were extracted out of `tasks/pickplace.py`'s `collect()` (where they
+  were closures) into PURE functions over an immutable **`GraspContext`** (the per-collect bundle, built once) plus
+  an explicit `solve`/`gqA` — so any task gets the SAME natural-posture planning with no copy-paste fork. The task's
+  disturbance trajectory ASSEMBLY stays in `pickplace.py` and just calls these planners.
 - **Full-DR harness** (`dr/`, + the DR subagent): encodes the *complete* DR spec once and applies it. See §4.
 - **Dexterity-aware IK** (`robots/ik.py` + `skills/pick_place.py`): Genesis-native sub-mm IK targeting the tool
   frame, wrapped by `reachable_grasp_quat`/`reachable_place_quat` (prefer top-down, relax to the smallest tilt

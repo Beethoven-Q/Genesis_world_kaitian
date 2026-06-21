@@ -29,12 +29,40 @@ phase lands. Requirements live in [project_overview.md](project_overview.md) (bl
 - `penetration` (`skills/penetration.py`) — faithful batched solid-solid interpenetration monitor read straight
   from the solver contact buffer (`max_penetration` / `abnormal_penetration` / `PenetrationTracker`); the owner
   #1 collision gate that rejects any demo with abnormal penetration. *(built — see §3g + progress log)*
-- (more: grasp primitives, collision-free planning around distractors.)
+- (more: collision-free planning around distractors.)
+- **Grasp skill** (`skills/grasp.py`) — the low-level orientation primitives (`orientation_aware_grasp_quat`,
+  `tilted_base_quat`, `transport_quats`, `world_long_axis`, …) PLUS the higher-level per-env grasp/carry
+  ORIENTATION + RoboLab-faithful WRIST-MARGIN relax-tilt PLANNING: `GraspContext` (the immutable per-collect
+  bundle), `grasp_quat_at` / `cquat` (the grasp/carry quat builders, incl. the cube-π/2 vs elongated-π symmetry
+  fold), `select_grasp_tilt` / `select_place_tilt` (prefer top-down, relax to the smallest tilt keeping |j4|≤1.40
+  & j3≥1.05 through pre-grasp+lift / over-bowl carry), and the `*_at` recovery variants for the disturbance
+  re-grasp. Pure functions over `GraspContext` + an explicit `solve`/`gqA` (de-closured out of `collect()`). Any
+  task imports them; the disturbance trajectory assembly stays in the task and just calls them. *(built — see progress log)*
 - **Object factory** (`world/object_factory.py`) — the ONE shared spec→sim-entity builder (collision + visual +
   native texture): `spawn_target` / `spawn_distractors` / `build_object` / `target_color`. Any task imports it and
   gets the verified collision + recognizable-texture behaviour with no copy-paste fork. *(built — see progress log)*
 
 ## Progress log
+- **2026-06-21 — Grasp ORIENTATION / WRIST-MARGIN planning extracted (agent-native modularity 2/3).** Moved the
+  per-env grasp/carry quat builders + the RoboLab-faithful relax-tilt selection OUT of `collect()` (where they were
+  CLOSURES over its locals) into `skills/grasp.py` as PURE functions: `grasp_quat_at`, `cquat`, `select_grasp_tilt`
+  (+ private `_posture_at_pick`), `select_place_tilt` (+ `_carry_posture`), and the disturbance-recovery variants
+  `select_grasp_tilt_at` / `select_place_tilt_at` (+ `_posture_at_pick_env`). The de-closure threads the former
+  closure environment through a frozen **`GraspContext`** dataclass (built ONCE in `collect()`: side/base/htR/laxis/
+  spec/yaw, the grasp-centre `gc` + over-bowl `bxyz`, APP/LIFT/PAPP, the tilt ladder + wrist/elbow thresholds); the
+  two values that VARY at runtime — the active-arm `solve` callable and the mutated `gqA` quats — are passed
+  EXPLICITLY (not frozen), so `select_place_tilt` reads the live `gqA` exactly as the closure did. Call sites are
+  1:1 (`grasp.grasp_quat_at(gctx, …)`); the DISTURBANCE trajectory assembly (chase/recover waypoints) stays in the
+  task and merely calls the moved planners (module 3). **Pure STRUCTURE move — function math byte-identical**
+  (verified: AST body-diff = only `ctx.`/arg threading; a pure-CPU harness gives 0.0 grasp-quat diff; the first
+  IK-probe `GQ_DIAG` dump — `gq`/`pre` hashes + `qpre`/`qlift` to 6 dp — is bit-identical HEAD↔refactor). Gate
+  (FAST, seed7) vs committed HEAD: cube DISTURB=0 N=8 → **8/8, T=977, 0 abn**, grasp tilt `[8,16,8,8,16,16,8,8]` +
+  place tilt `[16,16,8,16,16,16,16,16]` byte-identical; the cube hdf5 DR attrs diff = 0.0 (RNG order identical).
+  apple 12/12, banana 12/12, tennis 11/12, pen 12/12 (grasp-tilt arrays byte-identical, 0 abnormal pen). Disturbance
+  DISTURB=0.5 N=16 → same disturbed set `[0,2,5,7,12,14,15]`, same fire steps, same before/after-close phases, same
+  per-demo lengths, **T=1196**, **no-hold WORST=6 frames (PASS ≤8)**. The only deltas are 3rd-decimal IK jitter and a
+  single after-close recovery env's placed-outcome flip — both reproduced HEAD↔HEAD (HEAD itself ranges 13–15/16 on
+  this batch), i.e. GPU physics/IK nondeterminism, NOT a behaviour change.
 - **2026-06-21 — Object factory extracted (agent-native modularity).** Moved the OBJECT SPAWN + TEXTURE concern
   out of `tasks/pickplace.py` into a NEW shared `world/object_factory.py` (`spawn_target`, `spawn_distractors`,
   `_spawn_distractor_entity`, `target_color`, `_target_usd_surface`) and consolidated the orphaned
