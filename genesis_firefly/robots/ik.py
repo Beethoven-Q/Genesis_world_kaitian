@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 """Genesis-native IK adapter — the IK backend for the Genesis line.
 
-First-principles choice (verified): target the SIM's OWN ee_link with Genesis's built-in solver, which is
-sub-millimetre exact (0.1 mm / 0.01 deg over the workspace) because it uses the dual URDF's exact kinematics.
-RoboLab reused SODA's analytic IK, but SODA solves on a SEPARATE single-arm IK-chain URDF (gr100.urdf) whose
-wrist/gripper geometry does NOT rigidly map to the dual sim URDF's ee_link (~1 cm residual in Genesis) — so
-forcing it here would bake in grasp error. Genesis-native IK is simpler AND exact. (SODA's analytic IK still
-runs on the REAL robot via soda-bimanual; the policy is sensor-only, so the collector's IK choice is internal.)
+First-principles choice: target the SIM's OWN ee_link with Genesis's built-in BATCHED solver, which is
+sub-millimetre exact on the dual URDF's exact kinematics AND solves all N envs in one call (the parallelism the
+collector needs). RoboLab uses SODA's analytic IK on a separate single-arm gr100.urdf chain; a 2026-06-20
+experiment PROVED the two are IDENTICAL on our targets (joints match to 3 decimals, frame residual 0.00 mm, the
+gr100 chain and the dual sim URDF are byte-identical) — so the solver choice is purely internal and
+Genesis-native is the right one for batched parallelism. (The earlier "~1 cm residual" worry was falsified.)
+SODA's analytic IK still runs on the REAL robot via soda-bimanual; the policy is sensor-only, so the collector's
+IK choice is invisible to it.
 
 Exposes the SAME ``solve(ee_pos, ee_quat, q_init) -> IKSolution`` interface the reusable skills expect, so
 ``plan_pick_place`` / ``reachable_grasp_quat`` work unchanged.
