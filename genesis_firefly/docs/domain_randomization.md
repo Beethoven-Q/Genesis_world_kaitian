@@ -11,6 +11,36 @@ applies them with zero task involvement). Scope **B (object/task)** is per-objec
 
 ---
 
+## ⭐ THE RECOGNIZABILITY RULE (the #1 realism principle — load-bearing, owner 2026-06-20)
+
+Randomize an object's appearance (size, colour, texture, shape) **ONLY within the envelope where a human still
+INSTANTLY RECOGNIZES it as that specific object.** The moment a randomization makes the object unrecognizable —
+or collapses it into a **trivial geometric primitive** (a "yellow sphere", a "pink brick", a "red blob") — it is
+**WRONG and forbidden.** An unrecognizable object is *worse* than no randomization: it poisons the data and the
+language grounding (the policy is told "pick the tennis ball / the book" but is shown a plain yellow ball / a pink
+brick). We must NOT let our objects degenerate into simple, trivial geometry shapes.
+
+- **Objects keep their IDENTITY.** A tennis ball must look like a tennis ball (felt + the curved seam, regulation
+  yellow-green); a book like a book (a readable cover, pages); an apple like an apple (red/green skin texture +
+  stem); a banana like a banana (curved, yellow/green). **Never let an object degenerate into a bare primitive.**
+- **Identity-from-TEXTURE objects MUST use their NATIVE TEXTURE, not a flat colour.** Apple, tennis ball, book —
+  their identity *is* their surface. A flat colour destroys it (2026-06-20 screenshot: tennis → flat yellow ball,
+  book → flat pink brick, apple → flat pink blob = all WRONG). If a native texture isn't available yet, **SOURCE
+  or MAKE one** (a real asset / UV-mapped texture) — do NOT settle for a flat-colour primitive.
+- **The randomization ENVELOPE is per-object + identity-preserving:** apple a bit bigger/smaller, usually red
+  (native) / sometimes green — never blue / flat-pink / watermelon-sized. Banana yellow (mostly) / green (unripe).
+  Tennis ball regulation yellow-green felt + seam, size ≈ regulation. Book real covers + sizes, always readable.
+- **GENERIC objects (a toy cube / block) are the ONLY exception** — they have no identity beyond "a coloured
+  block", so free-colour DR keeps them recognizable. This exception is NARROW; it NEVER extends to an
+  identity-bearing object (you cannot "fix-colour a sphere and call it a tennis ball").
+- **Applies to BOTH the grasp TARGET and the DISTRACTORS** — a distractor "book" that's a pink brick is just as
+  wrong as a target one. Every object on the table must be recognizable.
+- **The DR-strategist OWNS + ENFORCES this** (see its contract). A flat-colour primitive of an identity-bearing
+  object is a **BUG to fix** (source the texture/asset), not an acceptable "FIXED-colour" state. When in doubt,
+  NARROW the envelope rather than risk an unrecognizable object.
+
+---
+
 ## The hard renderer constraint (why "per-build" vs "per-env")
 
 Verified in the Nyx SDK: **COLOR, TEXTURE, and geometry SIZE bake at build time** and are shared by all envs

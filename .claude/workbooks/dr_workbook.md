@@ -56,15 +56,19 @@ DR-strategist-owned). A NEW object gets classified here BEFORE it is collected.
 | object | class | render source | colour DR | evidence / rationale |
 |---|---|---|---|---|
 | **apple** | NATIVE TEXTURE | `objaverse/textures/apple_02.png` via `native_texture` | **none** (texture IS the colour) | `apple_clean.obj` fully UV-mapped (898 `vt`, all 1558 faces ref UVs); 1024² real apple texture (natural red mottling + stem); **renders in Nyx, no segfault** (probed 2026-06-20). Replaced the flat pink palette that overrode the real skin. |
-| **banana** | REALISTIC PALETTE | clean-mesh + `target_palette` | yellow×2 / green (unripe), ±0.04 | `banana_clean.obj` has **0 `vt`** (no UVs) → a texture can't map onto the Nyx-safe mesh; YCB USD segfaults Nyx. Palette yellow looked GOOD to the owner. NEVER pink/blue. |
+| **banana** | ⚠️ **NATIVE TEXTURE NEEDED** (currently DEGENERATE — flat pure yellow) | should be a real banana texture (yellow + brown speckles/tips + green stem) on a UV-mapped banana mesh | **none** (texture IS the look) | **A flat pure-yellow banana looks fake** (owner 2026-06-20). `banana_clean.obj` has **0 `vt`** (no UVs) + the YCB USD segfaults Nyx → **ACTION: re-export a UV-mapped banana + bake the YCB scan texture (or source a textured banana asset)**, like the apple. The flat-yellow palette is the degenerate state to replace. |
 | **pen** (dry-erase marker) | REALISTIC PALETTE | clean-mesh + `target_palette` | black / blue / red, ±0.04 | `dry_erase_marker_clean.obj` has **0 `vt`** (no UVs). Normal marker colours only. |
-| **tennis_ball** | FIXED | procedural sphere + 1-entry palette | **none** (regulation) | regulation yellow-green felt `(0.82,0.92,0.22)`; single-entry palette → effectively fixed. Special-coloured object → no DR. |
-| **cube** | FREE random | procedural box + free distinct-from-table colour | full free hue | a generic shape with NO real-world colour → the only free-random target; keeps the cube collection byte-for-byte. |
+| **tennis_ball** | ⚠️ **NATIVE TEXTURE NEEDED** (currently DEGENERATE — flat yellow-green sphere) | should be a real tennis-ball texture (felt + the curved white seam) on a UV-mapped sphere | **none** (texture IS the look) | **A flat sphere is NOT a recognizable tennis ball** (RECOGNIZABILITY RULE, owner screenshot). The old `FIXED (0.82,0.92,0.22)` sphere was WRONG. **ACTION: make/source a tennis-ball texture + UV sphere**, like the apple. |
+| **book** | ⚠️ **NATIVE TEXTURE NEEDED** (currently DEGENERATE — flat pink/red brick) | should be a real book mesh + cover texture | **none** (texture IS the look) | **A flat box is NOT a recognizable book** (owner: "no one can tell it's a book"). **ACTION: source a book asset / cover texture** (applies to the distractor render too). |
+| **cube** | FREE random ✅ | procedural box + free distinct-from-table colour | full free hue | the ONLY exception to native-texture: a generic toy block has NO identity beyond "a coloured block" → free colour keeps it recognizable. Keeps the cube collection byte-for-byte. |
 
-**Rule of thumb for a new object:** prefer NATIVE TEXTURE if the clean .obj carries UVs (`grep -c '^vt '` > 0) AND
-the texture renders in Nyx (probe it — the USD often segfaults, the clean mesh may lack UVs); else a REALISTIC
-PALETTE (realistic hues only — no blue watermelon, no oversized); FIXED for a regulation colour; FREE only for a
-generic colourless shape. Record the UV count + the Nyx render check as evidence.
+**Rule of thumb for a new object (RECOGNIZABILITY FIRST — see contract + `docs/domain_randomization.md` ⭐):** the
+object MUST stay instantly recognizable; NEVER a degenerate primitive. If its identity is its SURFACE (fruit,
+ball, book, packaged goods — apple/banana/tennis/book), it needs a real NATIVE TEXTURE (UV-mapped, renders in
+Nyx) — **SOURCE/MAKE one if missing** (re-export a UV mesh + bake the scan texture, or download a textured
+asset); do NOT fall back to a flat-colour sphere/box. Only when a flat colour KEEPS it recognizable (a toy
+cube/block) use FREE / REALISTIC-PALETTE (realistic hues — no blue watermelon/oversized). Record the UV count +
+the Nyx render check + a recognizability judgement as evidence.
 
 ### Experience log
 - **2026-06-19 — v2 baseline (B=10 × E=20 = 200).** `/data3/genesis_fulldr/cube_fulldr_v2`:

@@ -57,10 +57,21 @@ extent**, vary **together along all axes**, model how **different DR aspects inf
    add a dated experience-log entry, and record any new hard corner.
 
 ## Per-object COLOUR / TEXTURE policy (YOU OWN THIS — scope C, per-object)
-The GRASP-TARGET's appearance is a per-object DR decision and it is YOURS. Every object is classified into one of
-three colour classes; the classification + its rationale live in your **workbook colour-policy table**, and the
-main agent reflects your decision in `registry/object_spec.py` (the `native_texture` / `target_palette` / `color`
-fields, which carry a comment that the DR-strategist owns them). Classify a NEW object before it is collected.
+The GRASP-TARGET's appearance (and every DISTRACTOR's) is a per-object DR decision and it is YOURS. Every object
+is classified into one of the colour classes below; the classification + its rationale live in your **workbook
+colour-policy table**, and the main agent reflects your decision in `registry/object_spec.py` (the
+`native_texture` / `target_palette` / `color` fields, which carry a comment that the DR-strategist owns them).
+Classify a NEW object before it is collected.
+
+> **THE RECOGNIZABILITY RULE governs everything here** (see `docs/domain_randomization.md` ⭐). Randomize an
+> object's appearance ONLY within the envelope where a human still INSTANTLY recognizes it as that specific
+> object. **NEVER let an object degenerate into a trivial geometric primitive** (tennis ball → "yellow sphere",
+> book → "pink brick", apple → "red blob" — all WRONG, owner 2026-06-20). An object whose IDENTITY comes from its
+> SURFACE (apple, **tennis ball, book**) MUST use a real NATIVE TEXTURE — *not* a flat colour and *not* a bare
+> primitive. **"FIXED flat colour on a procedural sphere/box" is NOT acceptable for an identity-bearing object**
+> (it was the wrong call for the tennis ball): if it has no usable texture/asset yet, your recommendation is
+> **SOURCE or MAKE one** (flag it to the main agent as an asset task), not fall back to a primitive. The narrow
+> FREE / FIXED-flat classes are ONLY for objects that stay recognizable as a flat shape (a toy cube/block).
 
 - **NATIVE TEXTURE** — the object has its OWN photoreal skin AND a clean .obj that carries usable UVs (check:
   `grep -c '^vt ' <mesh>.obj` > 0 AND all faces reference them) AND the texture renders in Nyx. Set
