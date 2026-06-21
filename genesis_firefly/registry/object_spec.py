@@ -151,9 +151,16 @@ REGISTRY: dict[str, ObjectSpec] = {
     # onto the banana body (short-proj +0.030 m = the body's centre at the long-axis midpoint, MEASURED from the
     # clean mesh: at |long|<2cm the body spans short-proj 0.011..0.052). The gripper then closes across the
     # banana's real ~3.7cm thickness. grasp_dz lifted a touch so the claws bracket the body, not skim the table.
+    # NATIVE TEXTURE (DR-strategist, RECOGNIZABILITY RULE): banana_tex.obj is the SAME geometry as banana_clean.obj
+    # (byte-identical V/F, identical volume + convex hull) but UV-mapped (10710 vt, all faces) -> renders the REAL
+    # BOP YCB-V banana scan (ycb/textures/obj_000010.png: yellow body, green stem, brown speckle/tips) via
+    # gs.textures.ImageTexture in _target_usd_surface, so the banana reads as a REAL banana, not a flat yellow stick.
+    # Swapping mesh_subpath does NOT disturb the verified banana grasp (same single-hull collider geometry).
+    # target_palette kept as the NATIVE_TEX=0 fallback; native-texture -> NO per-frame colour DR.
     "banana": ObjectSpec(
         name="banana", language_name="banana", source="usd", usd_subpath="ycb/banana.usd",
-        mesh_subpath="ycb/banana_clean.obj", dist_color=(0.92, 0.80, 0.15),
+        mesh_subpath="ycb/banana_tex.obj", dist_color=(0.92, 0.80, 0.15),
+        native_texture="ycb/textures/obj_000010.png",
         mass=0.080, extents=(0.1089, 0.1784, 0.0367), local_center=(0.0, 0.0, 0.0),
         elongated=True, local_long_axis=(0.3372, 0.9414, 0.0), grasp_dz=-0.006,
         grasp_center_offset_local=(-0.0282, 0.0101, 0.0), grasp_single_hull=True, x_range=(0.34, 0.44),
@@ -180,9 +187,16 @@ REGISTRY: dict[str, ObjectSpec] = {
     # framework's hardest penetration case (a thin body the firm pad-near-pad clamp wants to over-bite), so it
     # rides near the 7mm gate -- at E=12 the odd far-reach env can still nick ~7.3mm (1/12). Lower-risk than a
     # deeper seat at the full close, which over-bit it (4/24 abnormal).
+    # NATIVE TEXTURE (DR-strategist, RECOGNIZABILITY RULE): dry_erase_marker_tex.obj is geometry-equal to the
+    # _clean.obj (identical volume/extents/convex hull; 14043 vt, all faces UV-mapped) -> renders the REAL BOP
+    # YCB-V large-marker scan (ycb/textures/obj_000018.png: white EXPO barrel + printed label band + black chisel
+    # cap/tip) via gs.textures.ImageTexture, so the pen reads as a REAL EXPO marker, not a flat colour stick. The
+    # geometry match preserves the verified (penetration-critical) pen grasp tuning. target_palette = the
+    # NATIVE_TEX=0 fallback; native-texture -> NO per-frame colour DR.
     "pen": ObjectSpec(
         name="pen", language_name="pen", source="usd", usd_subpath="ycb/dry_erase_marker.usd",
-        mesh_subpath="ycb/dry_erase_marker_clean.obj", dist_color=(0.10, 0.10, 0.12),
+        mesh_subpath="ycb/dry_erase_marker_tex.obj", dist_color=(0.10, 0.10, 0.12),
+        native_texture="ycb/textures/obj_000018.png",
         mass=0.020, extents=(0.0210, 0.1208, 0.0189), local_center=(0.0, 0.0, 0.0),
         elongated=True, local_long_axis=(-0.0303, 0.9995, 0.0), grasp_dz=-0.004, grasp_single_hull=True,
         grasp_close=0.78, rest_offset=0.004, release_dz=0.03, x_range=(0.34, 0.44), place_xy_tol_cm=9.0,
@@ -195,18 +209,39 @@ REGISTRY: dict[str, ObjectSpec] = {
     # green felt. Round handling like the apple (grasp at root, place tol 7cm). NEW for the Genesis 5-object gate.
     # tennis ball (round, ~6.7cm, pure sphere collider). Grasps at its CENTRE with the cube's top-down path once
     # the friction cone is tight (noslip_iterations) -- same round-object fix as the apple.
+    # NATIVE TEXTURE (DR-strategist, RECOGNIZABILITY RULE): a procedural sphere can ONLY be a flat-colour ball
+    # ("yellow sphere" = forbidden). Switched source="sphere" -> "usd" with a UV-mapped sphere mesh
+    # (generated/tennis_ball_tex.obj: R=0.0335m, extents EXACTLY (0.067,0.067,0.067), 4753 vt, all faces) so it
+    # renders the generated regulation optic-yellow-green FELT + the classic curved white SEAM texture
+    # (generated/textures/tennis_ball.png) via gs.textures.ImageTexture -> reads as a REAL tennis ball. COLLIDER:
+    # grasp_single_hull=True -> the convexified UV sphere = a clean convex SPHERE (faithful round collider, the
+    # same round-object grasp recipe as before: no preferred axis, tight friction cone noslip=5). dist_color added
+    # for the Nyx-safe distractor render (yellow-green felt). target_palette = NATIVE_TEX=0 fallback.
     "tennis_ball": ObjectSpec(
-        name="tennis_ball", language_name="tennis ball", source="sphere", mass=0.057,
+        name="tennis_ball", language_name="tennis ball", source="usd", mass=0.057,
+        mesh_subpath="generated/tennis_ball_tex.obj", dist_color=(0.82, 0.92, 0.22),
+        native_texture="generated/textures/tennis_ball.png", grasp_single_hull=True,
         extents=(0.067, 0.067, 0.067), local_center=(0.0, 0.0, 0.0), elongated=False,
         color=(0.85, 0.95, 0.20), friction=(1.1, 1.0), x_range=(0.34, 0.44), place_xy_tol_cm=7.0,
         target_palette=((0.82, 0.92, 0.22),)),                  # one colour: regulation yellow-green felt (no DR)
     # book: a flat hardcover (~18x13x3 cm, ~0.30 kg). Procedural box with a realistic dark-red cover colour;
     # high friction so it rests flat and is hard to nudge. Used as a clutter/distractor (not a grasp target
     # in pick-place), so no elongated/cube grasp hints are needed. NEW 2026-06-19 for the distractor pool.
+    # NATIVE TEXTURE (DR-strategist, RECOGNIZABILITY RULE): a procedural Box can ONLY be a flat brick (a Box has no
+    # UVs -> Nyx can't texture it; "pink brick" = forbidden). Switched source="cuboid" -> "usd" with a UV-mapped
+    # box mesh (generated/book_tex.obj: extents EXACTLY (0.18,0.13,0.03), 24 vt per-face, all faces) so it renders
+    # the generated hardcover atlas (generated/textures/book.png: teal cloth cover + gold-framed title plate +
+    # darker spine + cream page-edges with striations on the open edges) via gs.textures.ImageTexture -> reads as a
+    # REAL book, not a flat slab. COLLIDER: grasp_single_hull=True -> the convexified box = the same solid slab
+    # (faithful box collider). Book is a distractor-only object (never a grasp target) so there's no grasp tuning
+    # to preserve. dist_color added for the Nyx-safe distractor render; target_palette = NATIVE_TEX=0 fallback.
     "book": ObjectSpec(
-        name="book", language_name="book", source="cuboid", mass=0.300,
+        name="book", language_name="book", source="usd", mass=0.300,
+        mesh_subpath="generated/book_tex.obj", dist_color=(0.10, 0.42, 0.45),
+        native_texture="generated/textures/book.png", grasp_single_hull=True,
         extents=(0.18, 0.13, 0.03), local_center=(0.0, 0.0, 0.0), elongated=False,
-        color=(0.45, 0.10, 0.12), friction=(1.2, 1.0), x_range=(0.34, 0.44), place_xy_tol_cm=8.0),
+        color=(0.45, 0.10, 0.12), friction=(1.2, 1.0), x_range=(0.34, 0.44), place_xy_tol_cm=8.0,
+        target_palette=((0.10, 0.42, 0.45),)),                  # teal hardcover (NATIVE_TEX=0 fallback)
     # mug: a HOLLOW ceramic mug (YCB), REFINED + sim-ready-VERIFIED by the object-refiner harness
     # (registry/refine.py + demo_mug.py, 2026-06-19). The handle ring + cup mouth STAY HOLLOW via convex
     # DECOMPOSITION (34 hulls) — a branch threads the ring with 0.00mm overlap (verified). Mass from
