@@ -38,6 +38,10 @@ brick). We must NOT let our objects degenerate into simple, trivial geometry sha
 - **The DR-strategist OWNS + ENFORCES this** (see its contract). A flat-colour primitive of an identity-bearing
   object is a **BUG to fix** (source the texture/asset), not an acceptable "FIXED-colour" state. When in doubt,
   NARROW the envelope rather than risk an unrecognizable object.
+- **UNIVERSAL + PROACTIVE — not case-by-case.** EVERY object gets a recognizable texture up front (apple, banana,
+  tennis ball, book, pen, and every future object). The owner must NOT have to flag objects one by one: the
+  moment a new object enters the registry, the DR-strategist gives it a real native texture BEFORE collection.
+  Only a generic toy block (the cube) is exempt.
 
 ---
 
