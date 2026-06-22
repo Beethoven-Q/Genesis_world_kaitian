@@ -68,9 +68,9 @@ class BatchExecutor:
         active one per env. ``home_full`` is the [N, n_dofs] command the UNUSED arm holds. ``on_step
         (t, full_cmd[N,n_dofs], labels_t[N])`` is called every ``rec_every`` steps (and once at the
         end) for the task to record state + render. ``during_step(t, labels_t[N])`` (optional) is called
-        EVERY control step right after the sim step — used by the disturbance HARNESS to fire its gentle
-        impulse exactly when the active arm enters the grasp-approach window (it does NOT change motion;
-        it only lets the task inject a privileged sim event at the right moment). Returns T."""
+        EVERY control step right after the sim step — a generic per-step hook a task can use to inject a
+        privileged sim event at a precise moment (it does NOT change the motion; it only fires a callback
+        on the exact step). Returns T."""
         from robots.firefly_dual import GR100_MIMIC
 
         pos, quat, grip, labels, T = self.plan(waypoints)
@@ -111,7 +111,7 @@ class BatchExecutor:
                             self.max_dq_label[e] = f"{labels[max(t-1,0)][e]}->{labels[t][e]}"
                 prev_aq = aq
             full = apply(aq, grip[t])
-            if during_step is not None:                       # every-step hook (disturbance injection)
+            if during_step is not None:                       # generic per-step hook (privileged event injection)
                 during_step(t, labels[t])
             if on_step is not None and (t % self.rec_every == 0):
                 on_step(t, full, labels[t])

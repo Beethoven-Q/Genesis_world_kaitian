@@ -198,6 +198,36 @@ def place_waypoints(target_pos, open_g: float, close_g: float, *, quat=None, gra
 
 
 # ============================================================================================ #
+# GRASP ACTION  (the per-env grasp MOTION, de-closured from tasks/pickplace.py::pick_wps)
+# ============================================================================================ #
+def grasp_action_wps(ctx, i, gc_i, gq_i, open_g, close_g, app, lift, home_tool_i, home_tquat_i):
+    """The per-env GRASP action: home -> pre -> at -> at -> close -> lift for env ``i``, the orientation-aware
+    top-down approach + a FIRM GR100 close (the object's own collision stops the claws; the high-kp PD holds
+    the force) + a gentle lift. Returns labelled (ee_link) waypoints ``(label, pos, quat_wxyz, grip)``.
+
+    OBJECT-AGNOSTIC: the cube, the round apple/tennis, and the elongated banana/pen all use this same path.
+    (Round objects USED to need a special deep-seat + reorient approach to avoid ejecting under the firm pinch,
+    but that was a symptom of the leaky friction cone -- fixed at the source by noslip_iterations in
+    firm_rigid_options; round objects now grasp top-down+tilt exactly like the cube, no special machinery.)
+
+    De-closured from the in-line ``pick_wps`` closure: the caller passes the per-env grasp centre ``gc_i``, the
+    grasp orientation ``gq_i`` (built by ``grasp_quat_at`` + the relax-tilt), the gripper open/close scalars, the
+    pre-grasp standoff ``app`` + lift height ``lift``, and the env's home tool pose -- so a FUTURE grasp-based
+    task imports + composes this without reproducing the waypoint shape. ``ctx`` is accepted for signature
+    symmetry with the planning functions (the action itself reads only the explicit args)."""
+    gc_i = np.asarray(gc_i, float)
+    tzi = _R_from_wxyz(gq_i) @ np.array([0.0, 0.0, 1.0])         # the (tilted) approach axis in world (ee +Z)
+    return [
+        ("start", home_tool_i,         home_tquat_i, open_g),
+        ("pre",   gc_i - app * tzi,    gq_i,         open_g),
+        ("at",    gc_i,                gq_i,         open_g),
+        ("at",    gc_i,                gq_i,         open_g),
+        ("close", gc_i,                gq_i,         close_g),
+        ("lift",  gc_i + [0, 0, lift], gq_i,         close_g),
+    ]
+
+
+# ============================================================================================ #
 # HIGHER-LEVEL GRASP-ORIENTATION / WRIST-MARGIN PLANNING  (moved here from tasks/pickplace.py)
 # ============================================================================================ #
 # These BUILD ON the low-level primitives above (tilted_base_quat, orientation_aware_grasp_quat,
@@ -206,8 +236,8 @@ def place_waypoints(target_pos, open_g: float, close_g: float, *, quat=None, gra
 # collect()'s locals; they are now PURE functions taking an immutable ``GraspContext`` (the per-collect
 # bundle built once) plus the working ``solve``/``gqA`` passed explicitly. Behaviour is byte-identical to
 # the in-line collector (the cube 8/8 · T=977 · RNG-order regression proves it); only the structure moved.
-# The DISTURBANCE trajectory ASSEMBLY (chase/recover waypoint construction) stays in the task and merely
-# CALLS ``grasp_quat_at`` / ``select_grasp_tilt_at`` / ``select_place_tilt_at`` from here.
+# The grasp-RETRY (skills/grasp_retry.py) re-grasp ASSEMBLY stays in the task and merely CALLS
+# ``grasp_quat_at`` / ``select_grasp_tilt_at`` / ``select_place_tilt_at`` from here.
 
 
 @dataclass(frozen=True)
@@ -216,8 +246,8 @@ class GraspContext:
     per-env DR arrays, the arm/object geometry, the lift/approach heights, and the wrist-margin thresholds -- the
     former closure environment, frozen so a moved function reads exactly what the in-line closure did. The two
     values that VARY during a run (the active-arm ``solve`` callable and the working grasp quats ``gqA``) are NOT
-    stored here; they are passed explicitly to each function so the de-closure is faithful (gqA is mutated by the
-    disturbance path AFTER select_place_tilt runs)."""
+    stored here; they are passed explicitly to each function so the de-closure is faithful (gqA can be re-built
+    per env -- e.g. the grasp-retry re-plans it at the re-read pose -- AFTER select_place_tilt runs)."""
     N: int
     side_is_left: np.ndarray
     base: dict          # {"left": (x,y), "right": (x,y)} -- the arm-base xy the reach direction is measured from
@@ -382,7 +412,7 @@ def select_place_tilt(ctx: GraspContext, solve, gqA):
 def _posture_at_pick_env(ctx: GraspContext, solve, env_i, gci, tilt_deg, apex_z=None, *, ref_axis_world=_NO_REF):
     """Single-env (gq, |j4|, j3) over the PICK binding frames at grasp centre ``gci`` and the given tilt -- the
     env_i row of ``_posture_at_pick``, so the SCORING is byte-identical. ``apex_z`` (the recovery rise apex
-    height): the recovery/chase re-grasp does rise->REORIENT-at-apex->descend->close->lift, so the high apex
+    height): the grasp-retry re-grasp does rise->REORIENT-at-apex->descend->close->lift, so the high apex
     REORIENT (top-down at high EEz) is ALSO a binding frame that can saturate the wrist (the same high-EE
     saturation the lift fix addressed). When given, the apex pose at ``gqi`` is folded into the worst-case so
     the relax ladder picks a tilt comfortable AT THE APEX too -- otherwise the probe (pre+lift only) approves
@@ -415,7 +445,7 @@ def _posture_at_pick_env(ctx: GraspContext, solve, env_i, gci, tilt_deg, apex_z=
 def select_grasp_tilt_at(ctx: GraspContext, solve, env_i, gci, apex_z=None, *, ref_axis_world=_NO_REF):
     """Smallest of _GRASP_TILT_STEPS_DEG keeping |j4|<=limit-margin AND j3>=ELBOW_MIN through the pick at the
     SHOVED grasp centre ``gci`` -- the per-env relax ladder of ``select_grasp_tilt`` (identical thresholds).
-    ``apex_z`` folds the recovery/chase rise-apex reorient into the worst-case (see _posture_at_pick_env).
+    ``apex_z`` folds the recovery rise-apex reorient into the worst-case (see _posture_at_pick_env).
     ``ref_axis_world`` re-plans the grasp from the object's RE-READ axis so the tilt matches the recovery pose."""
     WRIST_LIMIT, WRIST_MARGIN, ELBOW_MIN = ctx.WRIST_LIMIT, ctx.WRIST_MARGIN, ctx.ELBOW_MIN
     for t in ctx.tilt_steps:

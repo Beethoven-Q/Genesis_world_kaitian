@@ -155,7 +155,7 @@ REGISTRY: dict[str, ObjectSpec] = {
     # (byte-identical V/F, identical volume + convex hull) but UV-mapped (10710 vt, all faces) -> renders the REAL
     # BOP YCB-V banana scan (ycb/textures/obj_000010.png: yellow body, green stem, brown speckle/tips) via
     # gs.textures.ImageTexture in _target_usd_surface, so the banana reads as a REAL banana, not a flat yellow stick.
-    # Swapping mesh_subpath does NOT disturb the verified banana grasp (same single-hull collider geometry).
+    # Swapping mesh_subpath does NOT change the verified banana grasp (same single-hull collider geometry).
     # target_palette kept as the NATIVE_TEX=0 fallback; native-texture -> NO per-frame colour DR.
     "banana": ObjectSpec(
         name="banana", language_name="banana", source="usd", usd_subpath="ycb/banana.usd",

@@ -326,7 +326,7 @@ All in `robots/firefly_dual.py` + `scenes/firefly_scene.firm_rigid_options()`.
   atlas + the entity matte override.
 - **Don't set link colours via PBR factors** — Nyx ignores them for URDFs (§1.3). Bake solid
   IMAGE textures.
-- **Don't chase grasp slip with friction or grip force** — friction was already correct, and
+- **Don't try to fix grasp slip with friction or grip force** — friction was already correct, and
   more force *worsened* swing. The fix was the **3mm contact-margin skin** (§4, row 5).
 - **Don't blame the PID for wrist jitter** — it's armature + integrator (§4.1).
 - **Don't use a watertight SDF collider for the bowl, and don't scale it** — use convex

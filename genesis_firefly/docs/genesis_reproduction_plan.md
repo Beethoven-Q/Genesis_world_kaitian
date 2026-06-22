@@ -385,7 +385,7 @@ Line A continues independently (A1–A5) whenever a GPU is free — one sim proc
 ---
 
 ## LINE C (BONUS, added 2026-06-18) — AERO dexterous-hand branch
-Owner add-on. AFTER the gripper Genesis line is done (safety: keep as a SEPARATE branch, don't disturb the
+Owner add-on. AFTER the gripper Genesis line is done (safety: keep as a SEPARATE branch, don't perturb the
 working gripper pipeline). Goal: make the SAME agentic design->solve->collect pipeline compatible with a
 DEXTEROUS HAND so the agent can solve tasks with fingers, not just a parallel gripper.
 - Hand: **AERO open hand** (https://tetheria.github.io/aero-hand-open/) — fetch its URDF/MJCF + meshes.

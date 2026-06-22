@@ -42,7 +42,41 @@ phase lands. Requirements live in [project_overview.md](project_overview.md) (bl
   gets the verified collision + recognizable-texture behaviour with no copy-paste fork. *(built — see progress log)*
 
 ## Progress log
-- **2026-06-21 — Grasp ORIENTATION / WRIST-MARGIN planning extracted (agent-native modularity 2/3).** Moved the
+- **2026-06-21 — Grasp + place ACTIONS extracted into skills (agent-native modularity).** The per-env grasp
+  MOTION and place MOTION were the last waypoint builders still living as CLOSURES in `tasks/pickplace.py`
+  (`pick_wps` / `place_tail`). Extracted them into REUSABLE de-closured skill functions so a future grasp-based
+  task imports + composes them: **`skills.grasp.grasp_action_wps`** (home→pre→at→at→close→lift) and a NEW
+  module **`skills/place.py::place_action_wps`** (settle+re-yaw→carry→lower→release→retract→go_home; the carry
+  quat is computed by the caller via `grasp.cquat` and passed in, so the place module has no GraspContext
+  dependency). The task's `pick_wps`/`place_tail` are now THIN one-line calls into the skills, and the
+  grasp-retry's `run_grasp_retry(pick_wps=…, place_tail=…)` is handed the same skill-backed builders. **Pure
+  STRUCTURE move — waypoints byte-identical** (verified: `scripts/temp/bytecheck_actions.py` diffs the skill
+  output against the verbatim old closure bodies over 2000 random inputs → worst element diff **0.000e+00**).
+  Gate (FAST, seed7): cube clean `8 7` → **8/8, T=977, 0 abn pen, max|dq|=0.020** (deterministic, byte-identical);
+  cube `NOISE_RETRY=0.45 16 7` → 16/16 placed, 0 abn, worst |j4| 1.434, no-hold 5f; apple `NOISE_RETRY=0.45 16 7`
+  → ~15-16/16 placed, 0 abn (the round-object recovery is GPU-nondeterministic run-to-run, |j4| 1.41-1.55 —
+  physics, not the refactor).
+- **2026-06-21 — Object-shove disturbance ERASED; replaced by object-agnostic grasp-retry + 4 fixes.** The
+  object-shove disturbance (a physics impulse on the OBJECT during the grasp approach) was DELETED: it coupled to
+  each object's dynamics (a light pen NaN-crashed, a round apple was flung, a banana penetrated → per-object
+  tuning, doesn't scale) and the linear shove + contact slide ROTATED the object so an xy-only prediction
+  misaligned the re-grasp. **New approach — `skills/grasp_retry.py` (OBJECT-AGNOSTIC):** put the imprecision in
+  the ROBOT's TARGET (action space) — with probability `NOISE_RETRY` a per-env grasp attempt is target-noised
+  (BIMODAL: a small Gaussian jitter that may still catch + a fixed-magnitude big clean-miss that closes BESIDE
+  the body), a god-mode check sees which envs MISSED, and the missed envs RE-GRASP at the object's TRUE re-read
+  pose (no double-perturb). One global knob set, no per-object tuning; worst case the gripper grazes the object,
+  it can never fling it. HOLD-FREE two-phase flow (attempt → god-mode check → place|retry), and the recovery
+  **respects the re-read ORIENTATION** (built from the live quaternion, not the stale yaw). **The 4 fixes that
+  landed with it:** ① the re-grasp reads the object's ACTUAL settled pose (position AND orientation); ② the
+  recovery grasp + carry RE-SELECT their relax-tilt at the re-read pose (`select_grasp_tilt_at` /
+  `select_place_tilt_at`, folding in the rise-apex reorient + the lift→over-bowl swing) so recovered demos stay
+  `|j4| < 1.45`; ③ a single `at` in the noised/recovery picks (the double-`at` was re-segmented by the two-phase
+  trim into a flagged no-hold dwell); ④ the bimodal big-clean-miss mode keeps the noised attempts (esp. the thin
+  pen) off the 7 mm penetration gate while still guaranteeing the miss. DEFAULT OFF (`NOISE_RETRY` unset → the
+  clean single-phase path is byte-identical). Per-object: **cube/banana/pen 100% placed after retry, apple/tennis
+  ~92%, 0 abnormal pen; retry-rate ~17-25%** (higher at the 0.45 validation setting). Doc: `docs/grasp_retry.md`.
+- **2026-06-21 — Grasp ORIENTATION / WRIST-MARGIN planning extracted (agent-native modularity; followed the
+  object-factory extraction).** Moved the
   per-env grasp/carry quat builders + the RoboLab-faithful relax-tilt selection OUT of `collect()` (where they were
   CLOSURES over its locals) into `skills/grasp.py` as PURE functions: `grasp_quat_at`, `cquat`, `select_grasp_tilt`
   (+ private `_posture_at_pick`), `select_place_tilt` (+ `_carry_posture`). The de-closure threads the former
@@ -63,7 +97,7 @@ phase lands. Requirements live in [project_overview.md](project_overview.md) (bl
   shim). pickplace.py imports it as `obj_factory` (NOT `objf` — that name is a local var in `collect()` for the
   object's final pos) and passes its OWN layout-specific distractor *placement* samplers
   (`choose_distractor_types`/`sample_distractor_poses`) into `spawn_distractors`. **Pure STRUCTURE move — function
-  bodies byte-identical** (verified by AST diff). Byte-identical gate (FAST, DISTURB=0, seed7) vs committed HEAD:
+  bodies byte-identical** (verified by AST diff). Byte-identical gate (FAST, clean path, seed7) vs committed HEAD:
   cube N=8 → 8/8 grasp+place, T=977, 0 abnormal pen; apple/banana/tennis/pen N=12 → grasp/place rates match HEAD
   (apple 12/12, banana 12/12, pen 12/12, tennis 11–12/12), distractors 100% collision-free. The only deltas are
   single-env boundary flips on the two objects that ride the 7 mm penetration gate (banana env4 6.9↔7.0 mm,
@@ -321,7 +355,7 @@ phase lands. Requirements live in [project_overview.md](project_overview.md) (bl
   COLLISION-LESS, INVISIBLE labeled frame/point (a virtual link for URDFs) the task solver reads from sim info.
   MUST NOT perturb the object's physics/topology. For PartNet-Mobility: give raw link/joint indices (link1/2/3)
   correct SEMANTIC names — VERIFIED by geometry/render, NEVER hallucinated (a wrong name misleads the solver).
-**C. Forward plan (after A+B land clean):** use the agentic system to SOLVE other-object pick-place (apple/
+**C. Forward plan (after the object-refiner items above land clean):** use the agentic system to SOLVE other-object pick-place (apple/
 banana/pen/tennis-ball; round-object grasp = the caging challenge) → after owner exam, collect their full-DR data
 → then the **virtual-EE skill + mug-hang**. **Dexterous hand:** a NEW git BRANCH (it substitutes the gripper),
 clean + safe; goal = pick-place with dex-hand+arm, then throw-and-catch a tennis ball in a parabola. Stay
@@ -350,7 +384,7 @@ agent-native; subagents for context; rigorous, no hallucination.
   per-object `target_palette` in the spec (apple red/green · banana yellow/green · tennis yellow-green · pen
   black/blue/red); the cube keeps its free random color (palette=None → byte-identical). `target_color()` picks +
   small jitter; specials (tennis) get one color.
-  *VERIFIED (DISTURB=0, N=12, FAST + 1 real render each):* placed/12 · max_pen(abnormal) · posture(j4max/j3min):
+  *VERIFIED (clean path, N=12, FAST + 1 real render each):* placed/12 · max_pen(abnormal) · posture(j4max/j3min):
   **cube 12/12 · 2.5mm(0) · 1.40/1.14** · **apple 12/12 · 5.7mm(0) · 1.43/1.07** · **tennis 12/12 · 6.4mm(0) ·
   1.43/0.98** · **banana 12/12 · 6.7mm(0) · 1.41/0.85** · **pen 10/12 clean (2 thin-pen over-pen at ~7.6mm) ·
   POSTURE OK 1.39/1.08**. All max|dq| ≈ 0.02 (smooth). Edits: `tasks/pickplace.py` (symmetry fold,
@@ -378,7 +412,7 @@ agent-native; subagents for context; rigorous, no hallucination.
   (not the raw root) so an offset-grasped banana isn't mis-flagged. Target velocity zeroed at settle end (anti-creep).
   *Regression (HARD gate):* `TARGET=cube pickplace.py 8 7` → **8/8 grasp+place, 0 pen, max|dq|=0.068** — byte-for-byte
   the pre-change cube (`spawn_target`'s cuboid branch is the exact old Box; clearance/rng draws unchanged).
-  *Per-object (real DISTURB=0 runs, E≤20):* **cube 8/8 ✅**. **banana ⚠️ partial** (E12: 7/12 grasp, **6/12 placed**,
+  *Per-object (real clean-path runs, E≤20):* **cube 8/8 ✅**. **banana ⚠️ partial** (E12: 7/12 grasp, **6/12 placed**,
   2 over-pen): the body-centre offset + single-hull land the claws on the fruit, but the 2-finger pinch on the
   **curved 3.8cm girth misses ~50%** of first attempts → retries → the retry re-grasp drives **>7mm** into the
   rounded body (first grasp alone is a clean ~6.4mm). **pen ❌ 0/20**: the descending open claws **sweep the light
@@ -394,8 +428,8 @@ agent-native; subagents for context; rigorous, no hallucination.
   `output/temp/pickplace_cube_demo.mp4`, `output/temp/pickplace_banana_demo.mp4`.
 
 - **2026-06-20 — NO-WAIT ROOT RE-ARCHITECTURE + clean reset (the foundation fix).** *Problem:* the owner kept
-  seeing the arm **idle in the air after the grasp** and trials waiting on each other. *Root cause:* the staged
-  `run_phase` A1/A2/**B**/C structure is a per-phase BARRIER — in the B-retry loop
+  seeing the arm **idle in the air after the grasp** and trials waiting on each other. *Root cause:* the (now
+  removed) staged multi-phase `run_phase` structure was a per-phase BARRIER — in the retry loop of that design
   every successful env HELD its lifted cube through the slowest env's retries (≈ the ~5 s mid-air idle), and each
   phase padded all envs to its own max. A grasp-solving subagent, not knowing the *hold* was the bug, then built
   a pile of machinery to fight the symptom (cradle-depth, `carry_keep_grasp_quat`, slow-close dwell). *Change:*
@@ -427,7 +461,7 @@ agent-native; subagents for context; rigorous, no hallucination.
   `grasp_quat_at`/`cquat` take a per-env `tilt_deg`; `select_grasp_tilt`/`select_place_tilt` prefer top-down and
   relax to the smallest tilt keeping `|wrist j4|<=1.40` AND `elbow j3>=1.05` through the pre-grasp+lift+carry
   (evaluated on the execution-faithful warm-start chain via the batched `solve()`); `LIFT 0.18->0.10`,
-  `PAPP 0.08->0.06`. *Verified (cube DISTURB=0, seeds 7+23, independently re-measured):* wrist |j4|max
+  `PAPP 0.08->0.06`. *Verified (cube clean path, seeds 7+23, independently re-measured):* wrist |j4|max
   **1.570->1.367** (margin 0.20), elbow j3min **0.344->1.216** (bent); 8/8 grasp+place, 0 abnormal pen (2.7mm),
   max|dq|=0.020 (smooth); pre-grasp + lift frames visibly compact/bent (`output/temp/tiltfix_final/FINAL_*.png`).
   *Process lesson (owner, emphatic):* the original Genesis-IK-vs-SODA-IK switch was an architectural trade-off
@@ -437,7 +471,7 @@ agent-native; subagents for context; rigorous, no hallucination.
 
 - **2026-06-20 — three object improvements on the natural-motion foundation (apple native texture · DR-strategist
   owns the colour policy · deeper grasp).** All on the correct relax-tilt + noslip + LIFT=0.10 foundation;
-  re-verified by REAL renders (DISTURB=0, seed 7); the CUBE regression held.
+  re-verified by REAL renders (clean path, seed 7); the CUBE regression held.
   1. **Apple NATIVE TEXTURE (Task #4).** The apple rendered a flat pink-red because its `target_palette` overrode
      its real skin. `apple_clean.obj` is fully UV-mapped (898 `vt`, all 1558 faces) to
      `assets/objects/objaverse/textures/apple_02.png` (1024² real apple texture). FIX: a new `ObjectSpec.native_texture`

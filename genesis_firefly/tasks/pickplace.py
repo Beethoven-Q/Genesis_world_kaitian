@@ -36,6 +36,7 @@ from skills.grasp import _R_from_wxyz, _wxyz_from_R  # noqa: E402
 # quat builders + the RoboLab-faithful relax-tilt selection were extracted out of collect() into skills/grasp.py
 # as PURE functions over a ``GraspContext`` (built once below). collect() builds the context + calls them 1:1.
 import skills.grasp as grasp  # noqa: E402
+import skills.place as place  # the per-env PLACE action (de-closured carry/lower/release/retract/home)  # noqa: E402
 import skills.grasp_retry as grasp_retry  # OBJECT-AGNOSTIC miss->retry orchestration (opt-in; default off)  # noqa: E402
 from skills.executor import BatchExecutor  # the ONE smooth motion path (densify + batch IK)  # noqa: E402
 from skills.penetration import PenetrationTracker, ABNORMAL_THRESH_M  # the #1 collision gate  # noqa: E402
@@ -713,42 +714,25 @@ def collect(N, seed, data_dir, out_dir, target=None):
     place_tilt = grasp.select_place_tilt(gctx, solve, gqA)
 
     def pick_wps(i):
-        """home -> pre -> at -> at -> close -> lift for env i: the orientation-aware top-down approach + a FIRM
-        GR100 close (the object's own collision stops the claws; the high-kp PD holds the force) + a gentle lift.
-        This is OBJECT-AGNOSTIC: the cube, the round apple/tennis, and the elongated banana/pen all use this same
-        path. (Round objects USED to need a special deep-seat + reorient approach to avoid ejecting under the firm
-        pinch, but that was a symptom of the leaky friction cone -- fixed at the source by noslip_iterations in
-        firm_rigid_options; round objects now grasp top-down+tilt exactly like the cube, no special machinery.)"""
-        gci = gc[i]
-        tzi = _R_from_wxyz(gqA[i]) @ np.array([0, 0, 1.0])
-        return [
-            ("start", home_tool[i],       home_tquat[i], OPEN),
-            ("pre",   gci - APP * tzi,    gqA[i], OPEN),
-            ("at",    gci,                gqA[i], OPEN),
-            ("at",    gci,                gqA[i], OPEN),
-            ("close", gci,                gqA[i], CLOSE),
-            ("lift",  gci + [0, 0, LIFT], gqA[i], CLOSE),
-        ]
+        """The per-env GRASP action (home->pre->at->at->close->lift) -- a THIN call into the reusable skill
+        ``skills.grasp.grasp_action_wps`` (de-closured: the orientation-aware top-down approach + FIRM GR100 close
+        + gentle lift now live in skills/grasp.py so a future grasp-based task composes them). Object-agnostic
+        (cube / round apple-tennis / elongated banana-pen share this path)."""
+        return grasp.grasp_action_wps(gctx, i, gc[i], gqA[i], OPEN, CLOSE, APP, LIFT, home_tool[i], home_tquat[i])
 
     def place_tail(i, liftp, gqi, place_tilt_i=None):
-        """From the LIFTED grasp pose ``liftp`` (held at ``gqi``): re-yaw to the carry orientation, carry over the
-        bowl, lower in, release, retract, GO HOME. This is APPENDED to the same continuous per-env waypoint stream
-        (the pick) so each env runs pick->place->home as ONE smooth trajectory and
-        TERMINATES at home -- no staged barrier, no mid-air wait for other envs.
+        """The per-env PLACE action (settle+re-yaw->carry->lower->release->retract->go_home) APPENDED to the pick
+        stream so each env runs pick->place->home as ONE smooth trajectory -- a THIN call into the reusable skill
+        ``skills.place.place_action_wps`` (de-closured: the carry/release/home shape now lives in skills/place.py).
+        The wrist-margin-aware carry orientation is computed HERE (via grasp.cquat) and passed in, so the place
+        skill stays a pure geometric builder with no GraspContext dependency.
 
         ``place_tilt_i`` overrides the clean batch carry tilt ``place_tilt[i]``: the grasp-retry recovery passes a
         tilt RE-SELECTED for its re-read grasp orientation (select_place_tilt_at) so the carry-over-bowl never
         over-stretches the wrist at a recovery grasp that differs from the clean one (the banana j4 fix)."""
         pt = float(place_tilt[i]) if place_tilt_i is None else float(place_tilt_i)
         cqi = grasp.cquat(gctx, i, gqi, pt)                       # wrist-margin-aware carry tilt (natural posture)
-        return [
-            ("lift",    liftp + [0, 0, 0.02],   cqi, CLOSE),       # small settle + re-yaw to the carry orientation
-            ("carry",   bxyz[i] + [0, 0, PAPP], cqi, CLOSE),
-            ("lower",   bxyz[i],                cqi, CLOSE),
-            ("rel",     bxyz[i],                cqi, OPEN),         # pose held -> gripper release ramp
-            ("ret",     bxyz[i] + [0, 0, PAPP], cqi, OPEN),
-            ("go_home", home_tool[i],           home_tquat[i], OPEN),  # smooth densified RETURN HOME (recorded)
-        ]
+        return place.place_action_wps(i, liftp, cqi, bxyz[i], PAPP, OPEN, CLOSE, home_tool[i], home_tquat[i])
 
     # per-env recorded-frame ranges, by phase. Each entry is the half-open [start,end) index into the shared
     # recording lists (acts/jpos/...) that this PHASE contributed. The clean path produces ONE phase covering
@@ -1015,8 +999,8 @@ def collect(N, seed, data_dir, out_dir, target=None):
     #   grip the firm PD micro-jitters) to a short SETTLE -- so no static-arm run ever exceeds the gate. A gripper
     #   transition is a NET move (a close shifts ~0.5 over its dwell); a hold only JITTERS about a mean, so we test a
     #   WINDOWED net change (not a per-frame delta, which can't tell a slow ramp from jitter).
-    # The CLEAN (DISTURB=0) single-phase path keeps its trajectory verbatim (only the home tail trimmed) -> byte-
-    # identical; its designed double-``at`` dwell is preserved (it has no inter-phase pad to collapse).
+    # The CLEAN (NOISE_RETRY off) single-phase path keeps its trajectory verbatim (only the home tail trimmed) ->
+    # byte-identical; its designed double-``at`` dwell is preserved (it has no inter-phase pad to collapse).
     # joint_position 14-D: [0:6]=L arm,[6]=L grip,[7:13]=R arm,[13]=R grip; take each env's ACTIVE arm + gripper.
     ARM_EPS, GRIP_NET, GRIP_W, SETTLE = 1.5e-3, 0.05, 6, 4
     arm_lo = np.where(side_is_left, 0, 7)                         # active-arm joint slice start, per env
