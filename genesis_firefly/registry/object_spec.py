@@ -88,6 +88,13 @@ class ObjectSpec:
     #                                 centre sits in the hollow of the curve, ~3cm off the fruit); the task
     #                                 rotates this by the object's world yaw and adds it to the grasp centre.
     #                                 (0,0,0) = grasp at the AABB centre (cube/pen/round -- their body IS centred).
+    # --- scope-B DR bands (dr/object_dr reads these; per-object realistic overrides) ---
+    size_band_frac: float = 0.10    # per-build SIZE DR: the target spawns at scale*(1 +/- this) (realistic +/-10%
+    #                                 keeps the object instantly RECOGNIZABLE -- no watermelon-sized apple). A
+    #                                 fragile-grasp object (the thin pen) narrows it so the grip stays robust.
+    friction_band: float = 0.20     # per-env OBJECT-friction DR: a friction-ratio half-width about spec.friction
+    #                                 (ratio in [1-band, 1+band], clamped >=0) -- a small realistic surface-finish
+    #                                 spread on the TARGET, DISTINCT from the robot-link friction knob.
     release_dz: float = 0.05        # height above the bowl centre to open/release (thin pen -> lower)
     contact_offset: float = 0.008   # speculative-contact band
     rest_offset: float = 0.0        # hard contact standoff (thin pen -> 0.004 to stop claw ON the surface)
@@ -210,6 +217,8 @@ REGISTRY: dict[str, ObjectSpec] = {
         mass=0.020, extents=(0.0210, 0.1208, 0.0189), local_center=(0.0, 0.0, 0.0),
         elongated=True, local_long_axis=(-0.0303, 0.9995, 0.0), grasp_dz=-0.004, grasp_single_hull=True,
         grasp_close=0.76, rest_offset=0.006, release_dz=0.03, x_range=(0.34, 0.44), place_xy_tol_cm=9.0,
+        size_band_frac=0.06,   # NARROWER size DR: the thin ~2cm pen body rides the firm-pinch penetration FLOOR
+        #                        (docs above), so scaling it up/down by 10% risks the gate; +/-6% keeps it robust.
         target_palette=((0.10, 0.10, 0.12), (0.12, 0.20, 0.55), (0.55, 0.12, 0.14))),  # black / blue / red marker
     "cube": ObjectSpec(
         name="cube", language_name="cube", source="cuboid", mass=0.040,

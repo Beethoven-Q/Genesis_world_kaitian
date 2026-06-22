@@ -51,17 +51,24 @@ def _T(pos, quat):
     return T
 
 
-def add_side_camera_rig(scene, body_surface=None, stick_surface=None):
+def add_side_camera_rig(scene, body_surface=None, stick_surface=None, dz=0.0):
     """The visible, collidable, world-fixed side-camera BODY (real D435i mesh) + support STICK — faithful to
     RoboLab's SIDE_CAM_BODY / SIDE_CAM_STICK. The mesh entity honours its own surface in Nyx (per-vgeom), so
-    the body renders dark like a real RealSense; the stick is a thin dark pole from the floor to the camera."""
+    the body renders dark like a real RealSense; the stick is a thin dark pole from the floor to the camera.
+
+    ``dz`` (>=0, m) = the SIDE-CAMERA-POSE DR (scope A): raise the visible body by ``dz`` and EXTEND the support
+    stick by the same amount (it still rises from the floor) so the rendered rig matches the raised cam_side
+    SENSOR (the stage moves the sensor + re-aims its lookat down). Side cam only -- the wrist cams are untouched."""
+    dz = float(dz)
     body = scene.add_entity(
-        gs.morphs.Mesh(file=CAMERA_BODY_MESH, pos=tuple(SIDE_BODY_POS), quat=tuple(SIDE_BODY_QUAT),
-                       fixed=True, collision=True, convexify=True),
+        gs.morphs.Mesh(file=CAMERA_BODY_MESH,
+                       pos=(float(SIDE_BODY_POS[0]), float(SIDE_BODY_POS[1]), float(SIDE_BODY_POS[2]) + dz),
+                       quat=tuple(SIDE_BODY_QUAT), fixed=True, collision=True, convexify=True),
         surface=body_surface or gs.surfaces.Plastic(color=(0.13, 0.13, 0.14), roughness=0.5))
+    stick_h = SIDE_STICK_H + dz                                   # floor -> raised camera (taller by dz)
     stick = scene.add_entity(
-        gs.morphs.Cylinder(radius=SIDE_STICK_R, height=SIDE_STICK_H,
-                           pos=(float(SIDE_BODY_POS[0]), float(SIDE_BODY_POS[1]), SIDE_STICK_H / 2),
+        gs.morphs.Cylinder(radius=SIDE_STICK_R, height=stick_h,
+                           pos=(float(SIDE_BODY_POS[0]), float(SIDE_BODY_POS[1]), stick_h / 2),
                            fixed=True, collision=True),
         surface=stick_surface or gs.surfaces.Plastic(color=(0.25, 0.25, 0.28), roughness=0.6))
     return body, stick

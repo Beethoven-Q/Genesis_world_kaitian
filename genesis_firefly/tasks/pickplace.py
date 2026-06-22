@@ -49,7 +49,7 @@ import world.object_factory as obj_factory  # the ONE shared spec->sim-entity bu
 # distractor TYPE/POSE placement stays here for now (task-layout-specific; Phase 3 extracts it).
 import dr as drpkg  # noqa: E402
 from dr.sampler import TaskSpec, sample_env_phys, sample_build_colours, sample_post_build  # noqa: E402
-from dr.apply import apply_build_dr, apply_env_dr  # noqa: E402
+from dr.apply import apply_build_dr, apply_env_dr, scaled_target_spec  # noqa: E402
 from dr.plan import demo_dr_attrs  # noqa: E402
 import imageio.v3 as iio  # noqa: E402
 import cv2  # noqa: E402
@@ -307,8 +307,19 @@ def collect(N, seed, data_dir, out_dir, target=None):
     # COLOUR policy (per-object realistic palette / native texture / free cube colour; the banana-PINK fix) lives
     # in the harness (dr.sample_build_colours -> world.object_factory.target_color). The build-DR draw order is
     # byte-for-byte: target free colour -> target palette colour -> bowl colour, then spawn target + bowl.
-    build_dr = sample_build_colours(stage, task_spec)           # per-build colours (target + bowl), RNG-ordered
-    cube, bowl = apply_build_dr(stage, task_spec, build_dr, pos_xy=(0.40, 0.18), z=0.30)  # spawn (colour @ build)
+    build_dr = sample_build_colours(stage, task_spec)           # per-build colours + object SIZE, RNG-ordered
+    cube, bowl = apply_build_dr(stage, task_spec, build_dr, pos_xy=(0.40, 0.18), z=0.30)  # spawn (colour+size @ build)
+    # SIZE DR (scope B): re-read the SCALED target spec (spec.scale * build_dr.obj_scale) and use it EVERYWHERE
+    # downstream -- the grasp planner, the spawn-clear floor, the score test all read scaled_extents()/rest_root_z
+    # off this spec, so the +/-size demo is self-consistent. obj_scale==1 returns the original spec (regression).
+    spec = scaled_target_spec(task_spec, build_dr)
+    task_spec.target_spec = spec
+    if abs(build_dr.obj_scale - 1.0) > 1e-9:
+        print(f"[COLLECT] object SIZE DR: scale x{build_dr.obj_scale:.3f} "
+              f"extents={np.round(spec.scaled_extents(), 3).tolist()}", flush=True)
+    print(f"[COLLECT] scene DR (per-build): otable {stage.otable_depth:.2f}x{stage.otable_width:.2f} "
+          f"(grow w{stage.otable_grow_w:.2f}/l{stage.otable_grow_l:.2f}) | sidecam +{stage.sidecam_dz*100:.1f}cm | "
+          f"light {stage.light_name} int{stage.light_intensity:.2f}", flush=True)
 
     # --- distractor / clutter objects (REQUIRED DR): 2-3 random irrelevant objects on the OBJECT table, in OPEN
     # areas, rejection-sampled OUT of the active arm's swept corridor (grasp + cube->bowl carry + bowl->home).
@@ -337,9 +348,10 @@ def collect(N, seed, data_dir, out_dir, target=None):
     ho = lay.object_table_height
     tabZ, bowx, bowy, cubx, cuby = dr["tabZ"], dr["bowx"], dr["bowy"], dr["cubx"], dr["cuby"]
     side_is_left, yaw = dr["side_is_left"], dr["yaw"]
-    # The BATCHED per-env setters (scope A object-table height + re-glue the textured top; scope B bowl/target
-    # pose + yaw + mass-shift + robot-link friction ratio) are issued by the harness in the SAME order as before.
-    apply_env_dr(stage, task_spec, cube, bowl, env_dr, robot)
+    # The BATCHED per-env setters (scope A object-table height + re-glue the textured top + TABLE FRICTION; scope
+    # B bowl/target pose + yaw + mass-shift + OBJECT FRICTION + robot-link friction ratio) are issued by the
+    # harness. ``spec`` (the SIZE-DR'd spec) is passed so the target rest-z uses the scaled body.
+    apply_env_dr(stage, task_spec, cube, bowl, env_dr, robot, spec=spec)
     # distractor per-env poses: drop each just above the table at its rejection-sampled XY with a random yaw
     # (in-plane spin). Absence (50/50) = park the entities far BELOW the scene (out of every camera + collision)
     # for those envs; they fall away harmlessly and never touch the workspace. They settle with cube/bowl below.
@@ -1022,7 +1034,8 @@ def collect(N, seed, data_dir, out_dir, target=None):
             # table height, mass, yaw, clearance, reach + the sweep multipliers in force) so the DR strategist
             # can correlate an outcome with WHERE in the DR space the env landed. Values are arm-frame (cube/bowl
             # y are signed by the active arm side). Merged into .attrs (outcome attrs above are the task's own).
-            for _k, _v in demo_dr_attrs(env_dr, e, dist_names=dist_names).items():
+            for _k, _v in demo_dr_attrs(env_dr, e, dist_names=dist_names,
+                                        build_dr=build_dr, stage=stage).items():
                 d.attrs[_k] = _v
             if not FAST:                                        # the sensor-only policy stream (kept frames only)
                 for nm in ("cam_side", "cam_lw", "cam_rw"):

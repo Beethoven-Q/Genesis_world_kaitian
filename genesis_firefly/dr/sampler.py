@@ -31,6 +31,30 @@ from dataclasses import dataclass, field
 import numpy as np
 
 import world.object_factory as obj_factory
+from dr.object_dr import object_dr
+
+
+# ---- scope-A object-table GROW + scope-A side-cam + scope-C light bands (per-build) -----------------------------
+# Object-table SIZE grow (scope A): the current size is the MINIMUM; grow the width (both y edges) up to +dW and
+# the length AWAY FROM THE ARM (the seam end stays pinned) up to +dL. Realistic table-size variety; the texture
+# rescales to stay flush. (env overrides let the DR strategist widen/narrow without editing code.)
+OTABLE_GROW_W = float(os.environ.get("OTABLE_GROW_W", "0.18"))     # max width grow (m), split over both y edges
+OTABLE_GROW_L = float(os.environ.get("OTABLE_GROW_L", "0.22"))     # max length grow (m), AWAY from the arm only
+# Side-cam (scope A): raise the SIDE cam up to +SIDECAM_DZ and pitch DOWN to keep the workspace framed (the stage
+# re-aims the lookat). Side cam ONLY -- the wrist cams are never touched.
+SIDECAM_DZ_MAX = float(os.environ.get("SIDECAM_DZ_MAX", "0.05"))   # max side-cam height raise (m)
+# Light (scope C, PER-BUILD -- Nyx can't switch the directional light per-env, only the env-map; see scopes.py):
+# a coloured directional KEY light. Realistic illuminant tints (kept mild so objects stay recognizable) + an
+# intensity band. The HDRI still supplies per-env image-based lighting on top.
+LIGHT_COLORS = {
+    "white":     (1.00, 1.00, 1.00),
+    "orange":    (1.00, 0.82, 0.60),   # warm tungsten
+    "yellow":    (1.00, 0.95, 0.70),   # warm white
+    "light_blue": (0.78, 0.88, 1.00),  # cool / overcast
+    "sun":       (1.00, 0.97, 0.88),   # daylight sun
+}
+LIGHT_INT_LO = float(os.environ.get("LIGHT_INT_LO", "0.7"))
+LIGHT_INT_HI = float(os.environ.get("LIGHT_INT_HI", "1.7"))
 
 
 def _dr_scale(name):
@@ -60,12 +84,22 @@ class TaskSpec:
 
 @dataclass
 class BuildDR:
-    """Per-build draws (constant within one parallel build). Phase 1: the object render colours + the realised
-    per-build scope-A/C visual choices RECORDED off the stage (table texture path; HDRI is per-env)."""
+    """Per-build draws (constant within one parallel build): the object render colours + the per-build scope-A/C
+    fields that BAKE at build (geometry SIZE, table SIZE, side-cam pose, the coloured light). The colours + table
+    texture are RECORDED off the stage (it owns its visual setup); the rest are drawn here and PASSED to the stage
+    (table-size/side-cam/light) or used at spawn (object size)."""
     target_color: tuple            # the grasp-target render colour (palette / free / native-fallback)
     bowl_color: tuple              # the bowl's free distinct colour
     target_free_color: tuple       # the FREE distinct-from-table colour drawn first (cube uses it directly)
     table_texture: object = None   # the per-build table-texture path realised by the stage (record-only)
+    # --- Phase-2 per-build fields (scope B object SIZE; scope A table-size + side-cam; scope C light) ---
+    obj_scale: float = 1.0         # the target's SIZE multiplier (scope B): spawned at spec.scale * obj_scale
+    otable_grow_w: float = 0.0     # object-table WIDTH grow (m), split over both y edges (scope A)
+    otable_grow_l: float = 0.0     # object-table LENGTH grow (m), AWAY from the arm only; seam end pinned (scope A)
+    sidecam_dz: float = 0.0        # side-cam height raise (m); the stage pitches DOWN to re-frame (scope A)
+    light_name: str = "white"      # the chosen illuminant tint name (scope C)
+    light_color: tuple = (1.0, 1.0, 1.0)   # the directional key-light RGB (scope C)
+    light_intensity: float = 1.2   # the directional key-light intensity (scope C)
 
 
 @dataclass
@@ -82,6 +116,9 @@ class EnvDR:
     cuby: np.ndarray
     yaw: np.ndarray
     mass_shift: np.ndarray
+    # --- Phase-2 per-env physics bands (scope A table friction; scope B object friction) ---
+    table_fric: np.ndarray = None   # (N,) per-env table friction-ratio about the Box spawn friction (scope A)
+    obj_fric: np.ndarray = None     # (N,) per-env TARGET friction-ratio about spec.friction (scope B, distinct knob)
     has_dist: np.ndarray = None
     fric: np.ndarray = None
     hdrs: list = field(default_factory=list)   # the realised per-env HDRI paths (recorded off the stage)
@@ -137,8 +174,21 @@ def sample_env_phys(N, rng, task_spec) -> EnvDR:
     yaw = (rng.rand(N) - 0.5) * np.radians(180)
     ms = _dr_scale("DR_MASS_SCALE")                            # cube mass-shift half-width multiplier
     mass_shift = ((rng.rand(N, 1) - 0.5) * 0.04 * ms).astype(np.float32)
+    # --- Phase-2 per-env FRICTION bands (drawn LAST so the pose/mass draws above keep their positions) ---
+    # (A) TABLE friction (scope A): a per-env ratio about the table-Box spawn friction, metal<->wood<->wool, kept
+    # DECOUPLED from the texture (the stage's texture choice never reads this). band [0.55,1.45] ~= metal..wool.
+    # (B) OBJECT friction (scope B): a per-env ratio on the TARGET about spec.friction (a small surface-finish
+    # spread), DISTINCT from the robot-link friction knob. Both are scaled by DR_FRIC_SCALE (the sweep hook) and
+    # clamped >=0. (Setting DR_TABLE_FRIC_SCALE / DR_OBJ_FRIC_SCALE to 0 toggles each field off for regression.)
+    fs = _dr_scale("DR_FRIC_SCALE")
+    tfs = _dr_scale("DR_TABLE_FRIC_SCALE") * fs
+    ofs = _dr_scale("DR_OBJ_FRIC_SCALE") * fs
+    table_fric = (1.0 + (rng.rand(N) - 0.5) * 0.90 * tfs).clip(0.0).astype(np.float32)   # ~[0.55,1.45]
+    ofb = float(getattr(object_dr(task_spec.target), "friction_band", 0.20))
+    obj_fric = (1.0 + (rng.rand(N) - 0.5) * 2.0 * ofb * ofs).clip(0.0).astype(np.float32)
     return EnvDR(side_is_left=side_is_left, sgn=sgn, tabZ=tabZ, bowx=bowx, bowy=bowy,
-                 cubx=cubx, cuby=cuby, yaw=yaw, mass_shift=mass_shift)
+                 cubx=cubx, cuby=cuby, yaw=yaw, mass_shift=mass_shift,
+                 table_fric=table_fric, obj_fric=obj_fric)
 
 
 def sample_build_colours(stage, task_spec) -> BuildDR:
@@ -150,8 +200,39 @@ def sample_build_colours(stage, task_spec) -> BuildDR:
     ch, free_color = stage.distinct_object_color()                 # the target's free random colour (+ hue to avoid)
     tgt_col = obj_factory.target_color(spec, free_color, stage.rng)  # realistic palette colour (cube -> free)
     _, bowl_col = stage.distinct_object_color(ch)
+    # object SIZE (scope B): the target spawns at spec.scale * obj_scale, obj_scale in [1-frac, 1+frac] (realistic
+    # +/-frac; grasp planning reads scaled_extents() so it adapts). Drawn HERE (after the colours, on stage.rng so
+    # it is part of the per-build draw sequence). DR_SIZE_SCALE=0 -> obj_scale=1 (toggle off for regression).
+    sbf = float(getattr(object_dr(task_spec.target), "size_band_frac", 0.10)) * _dr_scale("DR_SIZE_SCALE")
+    obj_scale = float(1.0 + (stage.rng.rand() - 0.5) * 2.0 * sbf)
+    # The BUILD-BAKED scope-A/C scene fields (object-table GROW, side-cam pose, the coloured LIGHT) are drawn
+    # INSIDE the stage __init__ (it owns its build-time geometry/visual setup, exactly like the table TEXTURE +
+    # per-env HDRI) -- RECORDED here off the stage so BuildDR is the single source for the trace.
     return BuildDR(target_color=tgt_col, bowl_color=bowl_col, target_free_color=free_color,
-                   table_texture=getattr(stage, "table_texture", None))
+                   table_texture=getattr(stage, "table_texture", None), obj_scale=obj_scale,
+                   otable_grow_w=getattr(stage, "otable_grow_w", 0.0),
+                   otable_grow_l=getattr(stage, "otable_grow_l", 0.0),
+                   sidecam_dz=getattr(stage, "sidecam_dz", 0.0),
+                   light_name=getattr(stage, "light_name", "white"),
+                   light_color=tuple(getattr(stage, "light_color", (1.0, 1.0, 1.0))),
+                   light_intensity=float(getattr(stage, "light_intensity", 1.2)))
+
+
+def sample_build_scene_dr(rng):
+    """Draw the BUILD-BAKED scope-A/C scene fields the STAGE needs at construction time (geometry/visual bake at
+    build, so they must be known before the entities are created): the object-table GROW (width + length-away),
+    the side-cam height raise, and the per-build coloured directional LIGHT. Called by ``ManipulationStage`` on
+    its own ``self.rng`` (the harness owns the catalogue + ranges; the stage owns WHEN). Returns a dict of the
+    realised values -> set onto the stage; ``sample_build_colours`` later records them onto ``BuildDR`` for the
+    trace. Each field has an env-var range/scale hook (DR_OTABLE_SCALE / DR_SIDECAM_SCALE; 0 toggles it off)."""
+    gw = float(rng.rand() * OTABLE_GROW_W * _dr_scale("DR_OTABLE_SCALE"))   # width grow (both y edges)
+    gl = float(rng.rand() * OTABLE_GROW_L * _dr_scale("DR_OTABLE_SCALE"))   # length grow AWAY from the arm only
+    sdz = float(rng.rand() * SIDECAM_DZ_MAX * _dr_scale("DR_SIDECAM_SCALE"))  # side-cam height raise (re-framed)
+    names = sorted(LIGHT_COLORS)
+    lname = names[int(rng.randint(len(names)))]
+    lint = float(LIGHT_INT_LO + rng.rand() * (LIGHT_INT_HI - LIGHT_INT_LO))
+    return dict(otable_grow_w=gw, otable_grow_l=gl, sidecam_dz=sdz,
+                light_name=lname, light_color=LIGHT_COLORS[lname], light_intensity=lint)
 
 
 def sample_post_build(N, stage, robot) -> dict:

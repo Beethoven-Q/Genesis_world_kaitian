@@ -11,9 +11,13 @@ Scope B (object / task) is PER-OBJECT and lives in ``dr/object_dr.py`` (keyed by
 which scope-B fields apply via its ``TaskSpec``. Scopes A and C come free — a task NEVER writes their logic.
 
 Each field is a ``DRField`` describing WHAT it is, WHERE it varies (per-build vs per-env), and its RANGE. The
-``implemented`` flag separates the 8 fields CURRENTLY sampled+applied (Phase 1 parity) from the documented
-Phase-2 STUBS (size, table-size, side-cam, table-friction, light) that are NOT yet sampled or applied. Adding a
-Phase-2 field = flip ``implemented`` and wire it into ``dr/sampler.py`` + ``dr/apply.py`` (Phase 2 work).
+``implemented`` flag marks the fields the harness actually samples+applies. As of Phase 2 ALL of scope A / C are
+implemented: the table-size grow, the side-camera pose, the table friction, and the per-build light DR all flow
+through ``dr/sampler.py`` -> ``dr/apply.py`` (table-size + side-cam + light realised inside the stage at build
+because COLOR/SIZE/geometry bake at build; the stage records the realised values for the trace). The ONE honest
+limit (verified in the Nyx SDK, see ``light`` below): the per-env render loop can only switch the ENV-MAP
+(``set_env_map(env_index)``), NOT the directional light — so the LIGHT DR is PER-BUILD (not per-env). The HDRI
+already supplies per-env image-based lighting, so per-env visual variety is preserved.
 
 NOTE ON OWNERSHIP (Phase 1): the scope-A texture / scope-C HDRI draws currently happen inside
 ``world.manipulation_stage.ManipulationStage.__init__`` (it is the reusable world harness and owns its own
@@ -58,17 +62,23 @@ SCENE_DR: dict[str, DRField] = {
     "object_table_height": DRField(
         "object_table_height", PER_ENV, "object-table top z = nominal +/- 5 cm (uniform)",
         implemented=True, note="EnvDR.tabZ; applied by apply_env_dr via otable.set_pos + stage.set_otable_top_z"),
-    # --- PHASE-2 STUBS (documented; NOT sampled or applied yet) ---
     "object_table_size": DRField(
         "object_table_size", PER_BUILD,
-        "width +0..dW; length extends ONLY away from the arm table (seam end fixed); texture rescales",
-        implemented=False, note="STUB (Phase 2): current size is the minimum"),
+        "width +0..OTABLE_GROW_W (def 0.18m); length extends ONLY away from the arm table (seam end fixed) "
+        "+0..OTABLE_GROW_L (def 0.22m); the textured top Plane rescales to stay flush",
+        implemented=True,
+        note="BuildDR.otable_grow_w/l drawn in sampler; the stage rebuilds the otable Box+top at that size "
+             "(geometry bakes at build); seam end pinned, growth away from the arm; realised size read for trace"),
     "side_camera_pose": DRField(
-        "side_camera_pose", PER_BUILD, "side cam height +0..5cm; pitch re-frames to keep the workspace framed",
-        implemented=False, note="STUB (Phase 2): side cam only, never the wrist cams"),
+        "side_camera_pose", PER_BUILD, "side cam height +0..5cm; pitch DOWN to re-frame so the workspace stays framed",
+        implemented=True,
+        note="BuildDR.sidecam_dz drawn in sampler; the stage raises the cam_side sensor + the visible D435i rig "
+             "and re-aims the lookat lower (pitch-down); side cam ONLY (the wrist cams are never touched)"),
     "table_friction": DRField(
-        "table_friction", PER_ENV, "small uniform band, metal<->wood<->fabric, independent of the texture",
-        implemented=False, note="STUB (Phase 2): friction stays decoupled from texture"),
+        "table_friction", PER_ENV, "uniform band metal(~0.5)<->wood(~0.9)<->wool/fabric(~1.3), DECOUPLED from texture",
+        implemented=True,
+        note="EnvDR.table_fric drawn in sampler; apply_env_dr sets it on the collidable table Boxes per-env "
+             "(set_friction_ratio about the Box's spawn friction); the texture/colour is never coupled to it"),
 }
 
 
@@ -82,10 +92,15 @@ VISUAL_DR: dict[str, DRField] = {
         "choice over the HDRI pool (2K when n_envs<=45, else the 1K pool); the HDRI is floor+walls+light",
         implemented=True,
         note="sampled+applied in ManipulationStage.__init__ (per-env env_maps); realised name read for the trace"),
-    # --- PHASE-2 STUBS (documented; NOT sampled or applied yet) ---
     "light": DRField(
-        "light", PER_ENV, "colour (orange/white/yellow/light-blue/sunlight) + reasonable brightness/intensity band",
-        implemented=False, note="STUB (Phase 2): a fixed neutral key light is used now (LIGHTS in the stage)"),
+        "light", PER_BUILD,
+        "directional key-light colour (orange/white/yellow/light-blue/sunlight) + intensity band (~0.7..1.7)",
+        implemented=True,
+        note="HONEST LIMIT (verified in the Nyx SDK): the per-env render loop can only switch the ENV-MAP "
+             "(renderer.set_env_map(env_index)) -- the directional LIGHT bakes at build (scene_asset.set_light) "
+             "and is NOT per-env settable. So light DR is PER-BUILD (still adds across-build variety); the HDRI "
+             "already supplies per-env image-based lighting. BuildDR.light_* drawn in sampler; the stage bakes the "
+             "coloured key light at build and records the colour/intensity for the trace"),
 }
 
 

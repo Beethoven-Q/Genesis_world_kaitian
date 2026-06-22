@@ -143,10 +143,14 @@ def np_(x):
 class ManipulationStage:
     """The reusable manipulation world. Construct, let the task add objects to ``self.scene``, then build."""
 
-    def __init__(self, n_envs, seed=0, res=RES, spp=SPP, noslip=0):
+    def __init__(self, n_envs, seed=0, res=RES, spp=SPP, noslip=0, full_dr=True):
         # ``noslip`` = the contact friction-cone tightening iterations for firm_rigid_options. The cube (flat
         # faces) holds with a leaky cone and a tight one over-penetrates it, so it passes 0; a round/curved/thin
         # target passes 5 (needs the tight cone to not eject). The TASK derives it from its target spec.
+        # ``full_dr`` = draw the BUILD-BAKED scope-A/C scene DR (object-table GROW, side-cam pose, coloured LIGHT)
+        # on self.rng (default ON -- the point of the harness). False (or FULL_DR=0) -> the minimum table size, the
+        # calibrated side cam, the neutral key light = the regression baseline. The catalogue + ranges live in
+        # dr/sampler (sample_build_scene_dr); the stage owns WHEN they're drawn (build-time geometry/visual setup).
         self.noslip = int(noslip)
         self.n_envs = int(n_envs)
         self.res = res
@@ -154,6 +158,7 @@ class ManipulationStage:
         self.rng = np.random.RandomState(seed)
         self.lay = TableLayout()
         self._built = False
+        self.full_dr = full_dr and os.environ.get("FULL_DR", "1") != "0"
 
         from gs_nyx_plugin.nyx_camera_options import NyxCameraOptions
         from gs_nyx import nyx_py_sdk as nps
@@ -185,6 +190,28 @@ class ManipulationStage:
         side = _texture_mean_rgb(self.table_texture) if self.table_texture else self.table_color
         self.aside_color = tuple(0.85 * c for c in side)         # arm table edge slightly darker
 
+        # PER-BUILD scope-A/C BUILD-BAKED scene DR (object-table GROW, side-cam pose, coloured LIGHT). Drawn HERE
+        # on self.rng (build-time geometry/visual bake, like the table texture above) from the harness catalogue
+        # (dr.sampler.sample_build_scene_dr). full_dr off -> the neutral baseline (no draw, no rng consumed).
+        if self.full_dr:
+            from dr.sampler import sample_build_scene_dr
+            sdr = sample_build_scene_dr(self.rng)
+        else:
+            sdr = dict(otable_grow_w=0.0, otable_grow_l=0.0, sidecam_dz=0.0,
+                       light_name="white", light_color=LIGHTS[0]["color"], light_intensity=LIGHTS[0]["intensity"])
+        self.otable_grow_w = float(sdr["otable_grow_w"])         # width grow (both y edges)
+        self.otable_grow_l = float(sdr["otable_grow_l"])         # length grow AWAY from the arm only
+        self.sidecam_dz = float(sdr["sidecam_dz"])               # side-cam height raise (re-framed lookat below)
+        self.light_name = str(sdr["light_name"])
+        self.light_color = tuple(sdr["light_color"])
+        self.light_intensity = float(sdr["light_intensity"])
+        # the GROWN object-table footprint (scope-A size DR): the near (seam) edge stays PINNED at seam_x; length
+        # grows ONLY toward the far edge (never overlaps the arm table); width grows symmetric about y=0. Drives
+        # the otable Box/top + the per-env height-DR setter (apply_env_dr reads otable_cx/depth/width).
+        self.otable_depth = self.lay.object_table_depth + self.otable_grow_l
+        self.otable_width = self.lay.common_width + self.otable_grow_w
+        self.otable_cx = self.lay.seam_x + self.otable_depth / 2.0
+
         # --- scene: NO ground plane -> the HDRI room is the immersive floor+walls; tables are the surfaces ---
         ha, ho = self.lay.arm_table_height, self.lay.object_table_height
         self.scene = gs.Scene(sim_options=gs.options.SimOptions(dt=0.01, substeps=4),
@@ -195,21 +222,32 @@ class ManipulationStage:
             gs.morphs.Box(size=(self.lay.arm_table_depth, self.lay.common_width, ha),
                           pos=(self.lay.seam_x - self.lay.arm_table_depth / 2, 0, ha / 2), fixed=True, collision=True),
             surface=gs.surfaces.Plastic(color=self.aside_color, roughness=0.6))
+        # OBJECT-TABLE SIZE DR (scope A): the GROWN footprint -- width over both y edges, length AWAY from the arm
+        # (seam edge pinned at seam_x). Box geometry bakes at build, so the grown size is fixed for this build.
         self.otable = self.scene.add_entity(
-            gs.morphs.Box(size=(self.lay.object_table_depth, self.lay.common_width, ho),
-                          pos=(self.lay.seam_x + self.lay.object_table_depth / 2, 0, ho / 2), fixed=True, collision=True),
+            gs.morphs.Box(size=(self.otable_depth, self.otable_width, ho),
+                          pos=(self.otable_cx, 0, ho / 2), fixed=True, collision=True),
             surface=gs.surfaces.Plastic(color=side, roughness=0.6))
         # textured tops (visual only, no collision). atable is static; otable is moved per-env by the task's
         # height DR -> its top Plane must track it (batch_fixed_verts=True) and the task calls set_otable_top_z.
         self.atable_top, self.otable_top = self._add_table_tops(ha, ho)
-        add_side_camera_rig(self.scene)                      # visible D435i body + support stick
+        # SIDE-CAMERA POSE DR (scope A): raise the visible D435i rig by sidecam_dz (the cam sensor is raised below).
+        add_side_camera_rig(self.scene, dz=self.sidecam_dz)  # visible D435i body + support stick (raised by DR)
 
+        # LIGHT DR (scope C, PER-BUILD): the directional key light takes the per-build illuminant tint + intensity
+        # (Nyx bakes the light at build -- it can't be switched per-env, only the env-map can; see scopes.py). The
+        # HDRI still supplies per-env image-based lighting on top. A copy so we never mutate the module LIGHTS.
+        lights = [dict(LIGHTS[0], color=tuple(self.light_color), intensity=float(self.light_intensity))]
         eidx = self.robot.entity.idx
-        nc = dict(lights=LIGHTS, env_maps=env_maps, spp=spp, denoise=True)
+        nc = dict(lights=lights, env_maps=env_maps, spp=spp, denoise=True)
+        # SIDE cam: raised by sidecam_dz and the lookat dropped by the SAME amount so the workspace stays framed
+        # (a pitch-DOWN re-aim). Only the SIDE cam moves -- the wrist cams (link-attached) + third cam are untouched.
+        side_pos = (float(SIDE[0][0]), float(SIDE[0][1]), float(SIDE[0][2]) + self.sidecam_dz)
+        side_lookat = (0.40, 0.0, 0.28 - self.sidecam_dz)
         self.cams = {
             "third": self.scene.add_sensor(NyxCameraOptions(res=res, pos=(1.15, -0.95, 0.62),
                      lookat=(0.30, 0.0, 0.34), fov=48, **nc)),       # low cam -> the room shows behind the arm
-            "cam_side": self.scene.add_sensor(NyxCameraOptions(res=res, pos=tuple(SIDE[0]), lookat=(0.40, 0.0, 0.28),
+            "cam_side": self.scene.add_sensor(NyxCameraOptions(res=res, pos=side_pos, lookat=side_lookat,
                         fov=SIDE_VFOV, **nc)),
             # wrist cams sit ~5cm from the gripper -> the default 0.1m near plane CLIPS the near finger
             # geometry (looked transparent). near=0.01 so the close fingers render solid. (side/third keep 0.1)
@@ -250,19 +288,22 @@ class ManipulationStage:
 
     def _add_table_tops(self, ha, ho):
         """Textured top Planes for both tables. The arm table is static; the object table is moved per-env by
-        the task's height DR, so its top Plane is batched (set_otable_top_z re-glues it after each set_pos)."""
+        the task's height DR, so its top Plane is batched (set_otable_top_z re-glues it after each set_pos). The
+        OBJECT-table top uses the GROWN footprint (scope-A size DR) so the texture Plane rescales to stay flush
+        on the bigger table (the tile_size is derived from the grown depth -> the texels keep their real-world
+        scale instead of stretching)."""
         atop = self._top_plane(self.lay.arm_table_depth, self.lay.common_width,
                                self.lay.seam_x - self.lay.arm_table_depth / 2, ha, batch_fixed=False)
-        otop = self._top_plane(self.lay.object_table_depth, self.lay.common_width,
-                               self.lay.seam_x + self.lay.object_table_depth / 2, ho, batch_fixed=True)
+        otop = self._top_plane(self.otable_depth, self.otable_width, self.otable_cx, ho, batch_fixed=True)
         return atop, otop
 
     def set_otable_top_z(self, top_z):
         """Glue the object-table TOP plane to the per-env object-table height. Call right after the task moves
         the object-table Box (``otable.set_pos(... z=tabZ-ho/2)``); `top_z` is the per-env table-TOP height
-        (``tabZ``), shape (N,). Keeps the texture flush on the randomized table (no float/sink)."""
+        (``tabZ``), shape (N,). Keeps the texture flush on the randomized (height + size DR) table (no float/sink).
+        Uses the GROWN otable centre x so the top tracks the size-DR'd table."""
         top_z = np_(top_z).reshape(-1).astype(np.float32)
-        cx = self.lay.seam_x + self.lay.object_table_depth / 2
+        cx = self.otable_cx
         pos = np.stack([np.full_like(top_z, cx), np.zeros_like(top_z), top_z + 2e-4], 1).astype(np.float32)
         self.otable_top.set_pos(pos)
 
@@ -303,6 +344,20 @@ class ManipulationStage:
             self.robot.entity.control_dofs_position(home); self.scene.step()
         return home
 
+    def set_table_friction(self, ratio):
+        """TABLE-FRICTION DR (scope A, per-env). Set the collidable table BOXES' friction per-env to ``ratio`` (a
+        (N,)-batched friction-ratio about each Box's spawn friction). DECOUPLED from the texture/colour -- the
+        texture choice never reads this. Applied to BOTH tables so an object slides/holds consistently on the
+        surface it rests on. Non-fatal (kept the collector's behaviour) if the engine lacks per-entity friction."""
+        ratio = np_(ratio).reshape(-1).astype(np.float32)
+        for tbl in (self.otable, self.atable):
+            try:
+                nl = tbl.n_links
+                tbl.set_friction_ratio(np.tile(ratio[:, None], (1, nl)))
+            except Exception as e:
+                print(f"[DR] table friction DR skipped: {e}", flush=True)
+                return
+
     def render(self):
         """Render the 4 batched Nyx cameras via the SENSOR API -> {name: (N,H,W,3) uint8}. read() re-attaches
         the wrist cams to link_6 each frame (true egocentric); per-env env maps make each env its own room."""
@@ -323,4 +378,6 @@ if __name__ == "__main__":
     iio.imwrite("/tmp/stage_selfcheck.png", v["third"][0])
     print("STAGE_OK third", v["third"].shape,
           "table_texture:", os.path.basename(st.table_texture) if st.table_texture else None,
+          "otable:", f"{st.otable_depth:.2f}x{st.otable_width:.2f} (grow w{st.otable_grow_w:.2f}/l{st.otable_grow_l:.2f})",
+          "sidecam_dz:", round(st.sidecam_dz, 3), "light:", st.light_name, round(st.light_intensity, 2),
           "rooms:", [os.path.basename(h) for h in st.hdrs])

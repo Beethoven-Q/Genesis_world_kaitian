@@ -15,17 +15,19 @@ duplicate the numbers, it reads them off the spec and pairs them with the (Phase
                (docs/domain_randomization.md) is enforced there: identity-bearing objects keep a native texture
                / realistic palette; only the generic cube gets a free random colour.
   * MASS     — a per-object additive mass-shift band about ``spec.mass`` (Phase-1: the cube's +/- 0.02 kg).
-  * FRICTION — Phase 1 randomizes the ROBOT-LINK friction ratio (a scene-level grasp-realism knob), NOT a
-               per-object friction; the object's own ``spec.friction`` is used as-is. A per-object friction band
-               is a documented Phase-2 stub.
+  * FRICTION — TWO independent knobs: (1) the ROBOT-LINK friction ratio (a scene-level grasp-realism knob, per-env,
+               already done), and (2) a per-object friction band on the TARGET itself (Phase 2): a small realistic
+               ratio band about the object's spawn ``spec.friction`` (``ObjectDR.friction_band``), applied per-env
+               via ``set_friction_ratio`` on the target entity. This is DISTINCT from the robot-link knob.
   * POSE     — per-env XY + in-plane yaw, sampled within the task-permitted / arm-permitted envelope. The pose
                RANGES are task-layout-specific (they depend on the arm's reachable workspace + inter-object
                clearance), so the literal pose numbers stay in the task; this module records that pose IS a
                scope-B field for every object.
-  * SIZE     — per-object realistic scale band (usually +/-10%). Phase-2 STUB (not sampled/applied yet).
+  * SIZE     — per-object realistic scale band (usually +/-``spec.size_band_frac``, default 10%), per-build. The
+               grasp planning reads ``spec.scaled_extents()`` so it adapts to the scaled body automatically.
 
-Phase 1 is a PARITY refactor: the colour/mass ranges below are exactly what ``tasks/pickplace.py`` +
-``world/object_factory.py`` already use. The ``ObjectDR`` view just makes them addressable per object name.
+The colour/mass ranges below are exactly what ``tasks/pickplace.py`` + ``world/object_factory.py`` already use;
+the ``ObjectDR`` view makes them addressable per object name and now carries the Phase-2 size/friction bands.
 """
 from __future__ import annotations
 
@@ -39,6 +41,13 @@ from registry.object_spec import REGISTRY
 # the object name here (a heavier book tolerates a wider absolute band, a light pen a narrower one).
 MASS_SHIFT_HALFWIDTH_KG = 0.02
 
+# Phase-2 defaults. SIZE: realistic +/-10% scale band (per-build) — small enough to keep every object instantly
+# recognizable (the RECOGNIZABILITY RULE) and to keep the grasp robust (scaled_extents() feeds the planner).
+# FRICTION: a small realistic per-object friction-ratio half-width about spec.friction (per-env) — distinct from
+# the robot-link knob. 0.20 -> ratio in [0.8, 1.2] (clamped >=0), a believable surface-finish spread.
+SIZE_BAND_FRAC = 0.10
+OBJ_FRIC_BAND = 0.20
+
 
 @dataclass(frozen=True)
 class ObjectDR:
@@ -50,10 +59,10 @@ class ObjectDR:
     mass_shift_halfwidth_kg: float
     randomizes_pose: bool = True  # every object's pose (XY + yaw) is per-env DR within the task envelope
     randomizes_mass: bool = True
-    # --- Phase-2 STUBS (documented; NOT sampled/applied yet) ---
-    size_band_frac: float = 0.10        # STUB: realistic +/-10% scale band (per-build); not applied in Phase 1
-    randomizes_size: bool = False       # STUB: flip + wire into sampler/apply for Phase 2
-    friction_band: float = 0.0          # STUB: per-object friction band; Phase 1 uses spec.friction as-is
+    # --- Phase-2 (sampled+applied) ---
+    size_band_frac: float = SIZE_BAND_FRAC   # realistic +/-frac scale band (per-build); spawned at scale*(1+u)
+    randomizes_size: bool = True             # the target's SIZE is DR'd (the cube too — a generic block scales fine)
+    friction_band: float = OBJ_FRIC_BAND     # per-object friction-ratio half-width (per-env), about spec.friction
 
 
 def classify_colour(spec) -> str:
@@ -69,9 +78,12 @@ def classify_colour(spec) -> str:
 
 
 def object_dr(name: str) -> ObjectDR:
-    """The scope-B DR view for an object by registry name (the task names which objects apply)."""
+    """The scope-B DR view for an object by registry name (the task names which objects apply). Per-object
+    overrides read off the ``ObjectSpec`` (``size_band_frac`` / ``friction_band``) when set, else the defaults."""
     if name not in REGISTRY:
         raise KeyError(f"unknown object {name!r} (choose from {sorted(REGISTRY)})")
     spec = REGISTRY[name]
     return ObjectDR(name=name, colour_policy=classify_colour(spec),
-                    mass_shift_halfwidth_kg=MASS_SHIFT_HALFWIDTH_KG)
+                    mass_shift_halfwidth_kg=MASS_SHIFT_HALFWIDTH_KG,
+                    size_band_frac=float(getattr(spec, "size_band_frac", SIZE_BAND_FRAC)),
+                    friction_band=float(getattr(spec, "friction_band", OBJ_FRIC_BAND)))

@@ -69,10 +69,10 @@ photoreal quality, and SIZE/object-type variety (only achievable this way). HDRI
 | field | what | range | variability |
 |---|---|---|---|
 | **table texture** ✅ IMPLEMENTED | wooden / steel / tablecloth albedo maps — NOT pure colour, NOT too fancy; **≥10** incl. several **bright tablecloths** (e.g. red-white floral) | choice over the texture pack | per-build |
-| **object-table relative height** | the relative height between the **object table** and the arm table — lower/raise the **object table only** | **uniform ±5 cm** | per-env |
-| **object-table size** | current size is the **minimum**; randomly grow width and length. **Length extends ONLY away from the arm table** (the end abutting the arm table is fixed at `seam_x + depth/2`); texture rescales accordingly | width: +0..Δw, length-away: +0..Δl | per-build |
-| **side-camera height + pitch** | **side cam only** (never the wrist cams). Current height = minimum; raise up to **+5 cm**; when raised, **pitch down slightly** to keep the workspace framed | height +0..5cm, pitch = re-frame | per-build |
-| **table friction** | metal ↔ wood ↔ wool/fabric, **independent of texture** | small uniform band | per-env |
+| **object-table relative height** ✅ IMPLEMENTED | the relative height between the **object table** and the arm table — lower/raise the **object table only** | **uniform ±5 cm** | per-env |
+| **object-table size** ✅ IMPLEMENTED (Phase 2) | current size is the **minimum**; grow width (both y edges) + length. **Length extends ONLY away from the arm table** (the seam end pinned at `seam_x`); the textured top **Plane rescales** to stay flush | width +0..`OTABLE_GROW_W` (def 0.18m), length-away +0..`OTABLE_GROW_L` (def 0.22m) | per-build |
+| **side-camera height + pitch** ✅ IMPLEMENTED (Phase 2) | **side cam only** (never the wrist cams). Current height = minimum; raise up to **+5 cm**; when raised, **pitch down** (lookat dropped by the same Δz) to keep the workspace framed. The visible D435i rig + stick rise with it | height +0..`SIDECAM_DZ_MAX` (5cm), pitch = re-frame | per-build |
+| **table friction** ✅ IMPLEMENTED (Phase 2) | metal ↔ wood ↔ wool/fabric, **independent of texture** — a friction-ratio band on the collidable table Boxes, never coupled to the texture choice | uniform ratio band ~[0.55, 1.45] | per-env |
 
 > **Table-texture — how it's implemented** (`world/manipulation_stage.py`): a 12-map pack lives in
 > `assets/textures/tables/` (4 wood · 3 steel/metal · 5 tablecloth incl. red/blue gingham + red-white
@@ -91,10 +91,10 @@ photoreal quality, and SIZE/object-type variety (only achievable this way). HDRI
 
 | field | what | rule | variability |
 |---|---|---|---|
-| **color** | object colour, **realistic** | banana = yellow (mostly) / green (unripe); apple = red / green; bowl/plate = china-white / plastic colours; cube = free; **never a blue watermelon** | per-build |
-| **size** | object scale, **realistic** | usually **±10%** (no watermelon-sized apple); pen length+thickness, banana, cup, … scaled reasonably | per-build |
-| **mass** | object mass | reasonable per-object range | per-env |
-| **friction** | object friction | small realistic range | per-env |
+| **color** ✅ IMPLEMENTED | object colour, **realistic** | banana = yellow (mostly) / green (unripe); apple = red / green; bowl/plate = china-white / plastic colours; cube = free; **never a blue watermelon** | per-build |
+| **size** ✅ IMPLEMENTED (Phase 2) | object scale, **realistic** | usually **±`spec.size_band_frac`** (def ±10%, the thin pen ±6% to stay off its penetration floor); spawned at `spec.scale*(1±u)` so `scaled_extents()` feeds the grasp planner unchanged — no watermelon-sized apple | per-build |
+| **mass** ✅ IMPLEMENTED | object mass | reasonable per-object range (±0.02 kg about `spec.mass`) | per-env |
+| **friction** ✅ IMPLEMENTED (Phase 2) | object friction (the TARGET) | small realistic ratio band about `spec.friction` (`spec.friction_band`, def ±0.20), **distinct** from the robot-link friction knob | per-env |
 | **damping / stiffness** | for **future articulated** objects: cabinet-door hinge, stapler joint, suitcase joint, drawer-track damping/friction | per-joint reasonable range | per-env |
 | **container fill** | for pouring: water **volume** inside a cup → affects **weight** | volume range | per-env |
 | **object type** | object **variants**: different staplers / cabinets / cups / bowls | choice over variants | per-build |
@@ -162,19 +162,39 @@ table in OPEN areas, with **realistic physics + collision** (they rest, can be b
 
 | field | what | range | variability |
 |---|---|---|---|
-| **immersive background** | the trial happens in a real scene: office / theatre / bedroom / outside / … (HDRI is the floor+walls+light; no ground plane) | choice over the HDRI pool | per-env |
-| **light** | colour: orange / white / yellow / light-blue / sunlight; + **brightness/intensity** | colour choice + reasonable intensity band | per-env |
+| **immersive background** ✅ IMPLEMENTED | the trial happens in a real scene: office / theatre / bedroom / outside / … (HDRI is the floor+walls+light; no ground plane) | choice over the HDRI pool | per-env |
+| **light** ✅ IMPLEMENTED (Phase 2) | directional key-light colour: orange / white / yellow / light-blue / sunlight; + **intensity** | colour choice + intensity band ~[0.7, 1.7] | **per-build** (see limit ↓) |
+
+> **Light DR — the honest per-env limit (verified in the Nyx SDK).** The Nyx renderer's per-env render loop can
+> only switch the **env-map** (`renderer.set_env_map(env_index)`); the **directional light bakes at build**
+> (`scene_asset.set_light(...)`, collected from the sensors once) and is **NOT** per-env settable — there is no
+> `set_light(env_index)`. So the directional-light DR is **per-build** (one coloured key light per build, varied
+> across build-batches — still adds variety). The **HDRI already supplies per-env image-based lighting** (each env
+> renders in its own room with that room's light), so per-env illumination variety is preserved; only the
+> directional *key* light is per-build. (`world/manipulation_stage.py`: drawn in `__init__` via
+> `dr.sampler.sample_build_scene_dr`, baked into the `lights=` passed to all 4 Nyx cameras.)
 
 ---
 
 ## How it's applied (the DR harness)
-- `dr/scopes.py` holds `SCENE_DR` (A) + `VISUAL_DR` (C) — the harness applies them to **every** task.
-- `dr/object_dr.py` holds scope-B, keyed by object name, with realistic per-object palettes/ranges.
-- `dr/sampler.py` splits a task's DR into a **BuildDR** (per-build draw) + a batched **EnvDR** (per-env arrays).
-- `dr/apply.py` injects BuildDR before scene construction (texture/size/extension/colors) and EnvDR after build
-  (the batched setters + per-env env-map/light selection).
-- `dr/plan.py` writes the exact sampled values per demo into the HDF5 attrs (`d.attrs["dr"]`) — every demo is
-  fully traceable, and the **DR subagent** (`.claude/agents/dr-strategist.md`) learns from it (see
-  [agents.md](agents.md)).
+- `dr/scopes.py` holds `SCENE_DR` (A) + `VISUAL_DR` (C) — the harness applies them to **every** task. As of Phase 2
+  **every** scope-A/C field is `implemented` (table texture/height/**size**/**friction**, **side-cam pose**, HDRI,
+  **light**); the only honest limit is the per-env→per-build light (above).
+- `dr/object_dr.py` holds scope-B, keyed by object name, with realistic per-object palettes/ranges + the
+  **size band** (`size_band_frac`) and **object-friction band** (`friction_band`) read off the `ObjectSpec`.
+- `dr/sampler.py` splits a task's DR into a **BuildDR** (per-build draws: colours, **object size**, + the realised
+  build-baked **table-grow / side-cam / light**) + a batched **EnvDR** (per-env arrays incl. **table friction** +
+  **object friction**). `sample_build_scene_dr(rng)` draws the build-baked scope-A/C scene fields the stage needs
+  at construction time (geometry/visual bake at build).
+- `dr/apply.py` `apply_build_dr` spawns the target at the **size-DR'd** spec (`scaled_target_spec`) before build;
+  `apply_env_dr` runs the batched per-env setters after build (object-table height on the **grown** Box, **table
+  friction**, bowl/target pose+yaw, mass, **object friction**, robot-link friction). The table-grow / side-cam /
+  light are realised inside `ManipulationStage` at build (it owns its build-time geometry/visual setup).
+- `dr/plan.py` writes the exact sampled values per demo into the HDF5 attrs — every demo is fully traceable. New
+  Phase-2 keys: `dr_obj_scale`, `dr_table_fric`, `dr_obj_fric`, `dr_otable_w/l` (+ `dr_otable_grow_w/l`),
+  `dr_sidecam_dz`/`dr_sidecam_z`, `dr_light_name`/`dr_light_r,g,b`/`dr_light_intensity`. The **DR subagent**
+  (`.claude/agents/dr-strategist.md`) learns from it (see [agents.md](agents.md)).
+- **Toggles** (regression/ablation): `FULL_DR=0` (no build-baked scene DR), `DR_SIZE_SCALE`, `DR_OTABLE_SCALE`,
+  `DR_SIDECAM_SCALE`, `DR_TABLE_FRIC_SCALE`, `DR_OBJ_FRIC_SCALE` (each a half-width multiplier; 0 = field off).
 
 A task NEVER writes DR logic — it names which scope-B fields apply (its `TaskSpec`); scopes A and C are free.
