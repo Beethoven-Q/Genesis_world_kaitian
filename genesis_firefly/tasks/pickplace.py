@@ -38,6 +38,8 @@ from skills.grasp import _R_from_wxyz, _wxyz_from_R  # noqa: E402
 import skills.grasp as grasp  # noqa: E402
 import skills.place as place  # the per-env PLACE action (de-closured carry/lower/release/retract/home)  # noqa: E402
 import skills.grasp_retry as grasp_retry  # OBJECT-AGNOSTIC miss->retry orchestration (opt-in; default off)  # noqa: E402
+import skills.distractors as distractors  # REUSABLE clutter placement (corridor-aware, task passes its keep-outs)  # noqa: E402
+import skills.score as score  # REUSABLE pick-place placement scorer (spec-aware) + through-wall metric  # noqa: E402
 from skills.executor import BatchExecutor  # the ONE smooth motion path (densify + batch IK)  # noqa: E402
 from skills.penetration import PenetrationTracker, ABNORMAL_THRESH_M  # the #1 collision gate  # noqa: E402
 from registry.object_spec import REGISTRY  # noqa: E402
@@ -48,7 +50,7 @@ import world.object_factory as obj_factory  # the ONE shared spec->sim-entity bu
 # now lives in dr/ -- this task only NAMES its scope-B field (the grasp target) and CALLS into the harness. The
 # distractor TYPE/POSE placement stays here for now (task-layout-specific; Phase 3 extracts it).
 import dr as drpkg  # noqa: E402
-from dr.sampler import TaskSpec, sample_env_phys, sample_build_colours, sample_post_build  # noqa: E402
+from dr.sampler import TaskSpec, sample_env_phys, sample_build_colours, sample_post_build  # noqa: E402  (the distractor TYPE/POSE placement is now the reusable skills/distractors.py; this task only NAMES its corridor.)
 from dr.apply import apply_build_dr, apply_env_dr, scaled_target_spec  # noqa: E402
 from dr.plan import demo_dr_attrs  # noqa: E402
 import imageio.v3 as iio  # noqa: E402
@@ -82,37 +84,20 @@ from dr.sampler import _dr_scale  # noqa: E402,F401  (re-export for back-compat;
 # ============================================================================ #
 # DISTRACTOR / CLUTTER OBJECTS  (REQUIRED DR feature, docs/domain_randomization.md scope B)
 # ============================================================================ #
+# The clutter TYPE-choice + corridor-aware POSE placement is the REUSABLE skill ``skills/distractors.py`` (it works
+# for ANY task with clutter: the task passes its swept keep-out corridor + table bounds, the skill returns clear,
+# non-stacking placements). THIS task supplies only its own POLICY + GEOMETRY below and two thin adapters that
+# build the corridor and call the skill -- so the corridor-clearance / grid-assignment math is no longer task-local.
+#
 # Pool of REALISTIC irrelevant objects. They render from their own assets/spec colours (apple red/green, banana
 # yellow, pen, tennis ball yellow-green, book dark-red) and are NEVER the grasp target. The TARGET's own type is
-# EXCLUDED from the pool (per-build, in choose_distractor_types) so the target is never ambiguous among
-# lookalikes -- e.g. when the target is the banana, the clutter is drawn from {pen, apple, tennis_ball, book, cube}.
+# EXCLUDED from the pool (per-build) so the target is never ambiguous among lookalikes -- e.g. when the target is
+# the banana, the clutter is drawn from {pen, apple, tennis_ball, book, cube}.
 DISTRACTOR_UNIVERSE = ["pen", "banana", "apple", "tennis_ball", "book", "cube"]
 # back-compat: the cube-target collection's pool (the cube is the target, so it is not a distractor) -- this is
 # exactly DISTRACTOR_UNIVERSE minus "cube", which is what choose_distractor_types(target="cube") produces, so the
 # cube regression draws the SAME clutter types as before.
 DISTRACTOR_POOL = ["pen", "banana", "apple", "tennis_ball", "book"]
-
-# Geometry of the active arm's swept XY corridor (the planner is pure waypoint-IK with NO obstacle avoidance, so
-# collision-freeness is achieved by PLACEMENT: distractors are rejection-sampled OUT of everything the arm
-# sweeps). All radii are half-clearances in metres about a point/segment; tuned on the verify gate so the max
-# distractor displacement stays well under 2 cm.
-_HOME_EE_XY = np.array([0.267, 0.224])     # active-arm EE at home (measured); y is mirrored by sgn
-# Corridor half-clearances (metres) to the distractor CENTRE about each swept feature; the sampler ADDS each
-# object's footprint radius so the whole BODY clears. They also cover the GRIPPER's physical extent (fingers +
-# wrist reach ~5-8cm beyond the EE/object centreline), so a long banana's far tip is never clipped. Tuned so
-# the arm never swipes a distractor (verified by the sim displacement gate: max distractor XY move < 2cm) while
-# leaving enough open table to place 2-3 objects out of the corridor.
-CLR_CUBE = 0.15     # around the cube: top-down grasp descent + open-gripper finger span + wrist width + margin
-CLR_BOWL = 0.15     # around the bowl: the release/lower + the gripper hovering above it
-CLR_CARRY = 0.15    # half-width of the cube->bowl transport tube (held object + gripper + wrist sweep)
-CLR_HOME = 0.14     # half-width of the bowl->home diagonal return tube (a long banana's far end can clip it)
-CLR_ARMHOME = 0.12  # keepout disk around EACH arm home (0.267, +/-0.224): the active arm transits its home and
-#                     the idle arm hovers at the other; a long distractor parked just past a home gets nudged.
-CLR_DIST = 0.03     # SURFACE gap between two distractors' footprint disks (added to BOTH footprint radii ->
-#                     centre-to-centre >= r_i + r_j + gap, so two bodies never overlap/stack at spawn)
-TABLE_MARGIN = 0.06  # inset from every table edge so a distractor never spawns half-off / on the rim
-SEAM_KEEPOUT_X = 0.30   # forbid the near-seam strip x < this (the arm links + base sweep it on every move)
-
 
 # the two LONG/large objects (banana ~18cm, book ~18cm): with the arm corridor removed, the open table area is
 # one ~0.3x0.45m region. TWO of these need ~0.18m spacing and don't reliably both fit there, so a build carries
@@ -120,140 +105,51 @@ SEAM_KEEPOUT_X = 0.30   # forbid the near-seam strip x < this (the arm links + b
 # with real spacing (no stacking -> the firm solver never NaNs on a spawn interpenetration).
 DISTRACTOR_LARGE = {"banana", "book"}
 
+# Geometry of the active arm's swept XY corridor (the planner is pure waypoint-IK with NO obstacle avoidance, so
+# collision-freeness is achieved by PLACEMENT: distractors are rejection-sampled OUT of everything the arm
+# sweeps). All radii are half-clearances in metres about a point/segment; the skill ADDS each object's footprint
+# radius so the whole BODY clears. They also cover the GRIPPER's physical extent (fingers + wrist reach ~5-8cm
+# beyond the EE/object centreline), so a long banana's far tip is never clipped. Tuned so the arm never swipes a
+# distractor (verified by the sim displacement gate: max distractor XY move < 2cm) while leaving enough open table
+# to place 2-3 objects out of the corridor.
+_HOME_EE_XY = np.array([0.267, 0.224])     # active-arm EE at home (measured); y is mirrored by sgn
+CLR_CUBE = 0.15     # around the cube: top-down grasp descent + open-gripper finger span + wrist width + margin
+CLR_BOWL = 0.15     # around the bowl: the release/lower + the gripper hovering above it
+CLR_CARRY = 0.15    # half-width of the cube->bowl transport tube (held object + gripper + wrist sweep)
+CLR_HOME = 0.14     # half-width of the bowl->home diagonal return tube (a long banana's far end can clip it)
+CLR_ARMHOME = 0.12  # keepout disk around EACH arm home (0.267, +/-0.224): the active arm transits its home and
+#                     the idle arm hovers at the other; a long distractor parked just past a home gets nudged.
+SEAM_KEEPOUT_X = 0.30   # forbid the near-seam strip x < this (the arm links + base sweep it on every move)
+
 
 def choose_distractor_types(rng, target="cube", pool=None):
-    """PER-BUILD: how many distractors (K in {2,3}) and which TYPES (entities are created before scene.build,
-    so the count + identities are fixed for the whole build). Drawn WITHOUT replacement so the K distractors
-    are visually distinct lookalikes (the policy must disambiguate the TARGET from a varied clutter set). At most
-    ONE large/long object (banana/book) per build so every set fits on the table out-of-corridor with real
-    spacing (the open area can't hold two 18cm objects clear of the arm path).
-
-    The TARGET's own type is EXCLUDED from the pool so the target is never ambiguous (e.g. a banana target draws
-    clutter from {pen, apple, tennis_ball, book, cube}). For ``target="cube"`` the pool is exactly the legacy
-    ``DISTRACTOR_POOL`` (universe minus cube, same items/order), so the cube collection draws IDENTICAL clutter."""
-    if pool is None:
-        pool = [n for n in DISTRACTOR_UNIVERSE if n != target]
-    k = int(rng.choice([2, 3]))
-    for _ in range(40):
-        names = list(rng.choice(pool, size=k, replace=False))
-        if sum(n in DISTRACTOR_LARGE for n in names) <= 1:
-            return names
-    return names
-
-
-def _seg_clearance(px, py, ax, ay, bx, by):
-    """Per-env XY distance from points (px,py) to the segment a->b (a,b are per-env arrays). Vectorised."""
-    abx, aby = bx - ax, by - ay
-    apx, apy = px - ax, py - ay
-    denom = abx * abx + aby * aby + 1e-12
-    t = np.clip((apx * abx + apy * aby) / denom, 0.0, 1.0)
-    cx, cy = ax + t * abx, ay + t * aby
-    return np.hypot(px - cx, py - cy)
-
-
-def _footprint_radius(spec):
-    """Half the XY diagonal of an object's AABB = the radius of the disk that contains the object at ANY yaw.
-    Insetting the table bounds + every clearance by this guarantees the WHOLE body (not just its centre) stays
-    on the table and out of the corridor, regardless of the random in-plane spin. Used for edge + corridor
-    clearance (safety-critical, and there is room there)."""
-    e = spec.scaled_extents()
-    return 0.5 * float(np.hypot(e[0], e[1]))
-
-
-def _space_radius(spec):
-    """A TIGHTER radius for inter-distractor SPACING only = half the object's longer horizontal extent (its
-    enclosing-square half-side), not the diagonal. Two flat-resting bodies whose enclosing squares are
-    separated by CLR_DIST never deeply interpenetrate (the firm solver only NaNs on a DEEP spawn overlap),
-    and this makes packing 3 long objects (banana/book) onto the table FEASIBLE where the circumscribed radius
-    would not. Edge/corridor still use the conservative circumscribed radius."""
-    e = spec.scaled_extents()
-    return 0.5 * float(max(e[0], e[1]))
-
-
-def _corridor_clear(cx, cy, rfoot, sgn, cubx, cuby, bowx, bowy, homx, homy):
-    """Bool mask: is footprint (cx,cy,rfoot) clear of the ARM corridor? The corridor = the near-seam strip + the
-    cube + the bowl + the cube->bowl carry tube + the bowl->ACTIVE-home return tube + a keepout around BOTH arm
-    homes (the active arm starts/ends there; the inactive arm holds there all episode, and either elbow can swing
-    over the near-home region). Every threshold ADDS rfoot so the whole BODY (not just the centre) clears."""
-    ok = (cx - rfoot >= SEAM_KEEPOUT_X)
-    ok &= np.hypot(cx - cubx, cy - cuby) >= CLR_CUBE + rfoot
-    ok &= np.hypot(cx - bowx, cy - bowy) >= CLR_BOWL + rfoot
-    ok &= _seg_clearance(cx, cy, cubx, cuby, bowx, bowy) >= CLR_CARRY + rfoot
-    ok &= _seg_clearance(cx, cy, bowx, bowy, homx, homy) >= CLR_HOME + rfoot
-    # the ACTIVE arm transits its own home (homx,homy) on the way out/back -> a small keepout disk there. (The
-    # idle arm hovers at the OTHER home but at z>=0.43, well above the table, so it can't touch a resting object.)
-    ok &= np.hypot(cx - homx, cy - homy) >= CLR_ARMHOME + rfoot
-    return ok
-
-
-def _anchor_grid(lay, rmax):
-    """A fine grid of candidate anchor CENTRES over the object table (~3.5cm pitch), inset by rmax so any object
-    centred on a cell stays fully on the table at any yaw. The placement greedily picks K mutually-spaced,
-    corridor-clear cells from this grid (one per distractor) -> non-overlap is GUARANTEED by construction."""
-    x0 = lay.seam_x + TABLE_MARGIN + rmax
-    x1 = lay.seam_x + lay.object_table_depth - TABLE_MARGIN - rmax
-    y1 = lay.common_width / 2 - TABLE_MARGIN - rmax
-    xs = np.arange(x0, x1 + 1e-6, 0.035)
-    ys = np.arange(-y1, y1 + 1e-6, 0.035)
-    if xs.size == 0:
-        xs = np.array([(x0 + x1) / 2])
-    if ys.size == 0:
-        ys = np.array([0.0])
-    return np.array([(x, y) for x in xs for y in ys])
+    """PER-BUILD distractor count + types -- a THIN wrapper over ``skills.distractors.choose_distractor_types``
+    that names THIS task's universe + large-object set. The TARGET type is excluded so the target is never
+    ambiguous; for ``target="cube"`` the pool is exactly the legacy ``DISTRACTOR_POOL`` (universe minus cube,
+    same items/order), so the cube collection draws IDENTICAL clutter (byte-for-byte RNG parity)."""
+    return distractors.choose_distractor_types(rng, DISTRACTOR_UNIVERSE, target, n_large_max=1,
+                                               large=DISTRACTOR_LARGE, counts=(2, 3), pool=pool)
 
 
 def sample_distractor_poses(N, specs, dr, rng, lay):
-    """PER-ENV: choose a clear XY + yaw for each distractor. GUARANTEES: (a) the whole BODY stays on the table
-    and OUT of the arm corridor (cube + bowl + cube->bowl carry tube + bowl->home return tube + near-seam strip)
-    at ANY yaw (circumscribed-radius clearance), and (b) no two distractors ever deeply interpenetrate at spawn
-    (enclosing-square spacing). Method = GREEDY GRID ASSIGNMENT: tile the table with a fine anchor grid, keep
-    the corridor-clear cells (favouring the opposite-y side from the active arm for variety), then greedily pick
-    K cells that are pairwise spaced >= rs_i+rs_j+CLR_DIST. Because each distractor gets its OWN well-separated
-    grid cell, nothing stacks (the firm solver NaNs on a deep spawn overlap) and nothing sits in the arm's path
-    (so it is never swiped). A tiny in-cell jitter (< half the leftover slack) keeps the variety without breaking
-    the spacing. Returns xy:(K,N,2), yaw:(K,N)."""
+    """PER-ENV clear XY + yaw for each distractor -- a THIN wrapper that builds THIS task's swept keep-out
+    corridor (cube + bowl + cube->bowl carry tube + bowl->ACTIVE-home return tube + a keepout around the active
+    arm home + the near-seam strip) as DATA and hands it + the table bounds to ``skills.distractors``. The
+    corridor-clearance / grid-assignment GEOMETRY (the reusable part) lives in the skill now; this only NAMES
+    the features the arm sweeps. RNG draw order is preserved so the placement is byte-for-byte the same."""
     sgn = dr["sgn"]
     cubx, cuby, bowx, bowy = dr["cubx"], dr["cuby"], dr["bowx"], dr["bowy"]
     homx = np.full(N, _HOME_EE_XY[0]); homy = sgn * _HOME_EE_XY[1]
-    K = len(specs)
-    rfoot = np.array([_footprint_radius(s) for s in specs])         # circumscribed: edge + corridor (safe@any yaw)
-    rspace = np.array([_space_radius(s) for s in specs])            # enclosing-square: inter-object spacing
-    rmax = float(rfoot.max())
-    grid = _anchor_grid(lay, rmax)
-    M = grid.shape[0]
-    out_xy = np.zeros((K, N, 2), np.float64)
-    out_yaw = ((rng.rand(K, N) - 0.5) * np.radians(180))
-    # largest distractor first -> the hardest-to-place objects claim space before the small ones
-    order = list(np.argsort(-rspace))
-    for e in range(N):
-        # corridor-clear cells for this env (use rmax so the test is valid for every distractor's footprint)
-        cc = _corridor_clear(grid[:, 0], grid[:, 1], rmax, np.full(M, sgn[e]),
-                             np.full(M, cubx[e]), np.full(M, cuby[e]), np.full(M, bowx[e]),
-                             np.full(M, bowy[e]), np.full(M, homx[e]), np.full(M, homy[e]))
-        cand = grid[cc]
-        # favour the opposite-y side (more open) then random, so clutter spreads & varies build-to-build
-        if cand.shape[0]:
-            opp = (np.sign(cand[:, 1]) != np.sign(sgn[e]))
-            cand = cand[np.lexsort((rng.rand(cand.shape[0]), ~opp))]
-        chosen_x = []; chosen_y = []; chosen_rs = []
-        for oi, k in enumerate(order):
-            rs = float(rspace[k]); pick = None
-            for ci in range(cand.shape[0]):                         # first corridor-clear cell spaced from chosen
-                cx, cy = cand[ci]
-                if all(np.hypot(cx - px, cy - py) >= CLR_DIST + rs + prs
-                       for px, py, prs in zip(chosen_x, chosen_y, chosen_rs)):
-                    pick = (cx, cy); break
-            if pick is None:                                        # no corridor-clear cell fits (very rare) ->
-                # park on the FAR-x edge (far from the seam/arm -> corridor-clear by construction), offset in Y
-                # by placement index so two un-placeable objects never coincide. X stays at the far edge.
-                xb = lay.seam_x + lay.object_table_depth - TABLE_MARGIN - rfoot[k]
-                yb = lay.common_width / 2 - TABLE_MARGIN - rfoot[k]
-                step = 2.0 * (float(rspace.max()) + CLR_DIST)
-                yy = float(np.clip(yb - oi * step, -yb, yb))
-                pick = (xb, -sgn[e] * yy)
-            out_xy[k, e] = pick
-            chosen_x.append(pick[0]); chosen_y.append(pick[1]); chosen_rs.append(rs)
-    return out_xy, out_yaw
+    corridor = distractors.KeepoutCorridor(
+        disks=[(cubx, cuby, CLR_CUBE), (bowx, bowy, CLR_BOWL), (homx, homy, CLR_ARMHOME)],
+        segments=[(cubx, cuby, bowx, bowy, CLR_CARRY), (bowx, bowy, homx, homy, CLR_HOME)],
+        seam_x=SEAM_KEEPOUT_X)
+    # table bounds = the usable region (edge margin already applied); the skill insets by each object's footprint.
+    table_bounds = (lay.seam_x + distractors.TABLE_MARGIN,
+                    lay.seam_x + lay.object_table_depth - distractors.TABLE_MARGIN,
+                    -(lay.common_width / 2 - distractors.TABLE_MARGIN),
+                    lay.common_width / 2 - distractors.TABLE_MARGIN)
+    return distractors.sample_distractor_poses(N, specs, corridor, table_bounds, rng, sgn)
 
 
 # OBJECT SPAWN + TEXTURE (the grasp target, the distractor entities, the native-texture surfaces) lives in the
@@ -867,26 +763,15 @@ def collect(N, seed, data_dir, out_dir, target=None):
           f"max per-step |dq|={float(global_max_dq.max()):.3f} rad", flush=True)
 
     # ---- score + realistic penetration check (per-env bowl centre) ----
+    # The PLACEMENT verdict (spec-aware placed band) + the geometric through-wall metric are the REUSABLE skill
+    # ``skills.score`` (any pick-place-into-a-container task reuses them); the penetration GATE stays
+    # skills.penetration (applied below). This task computes the per-env inputs and calls the scorer 1:1.
     objf = np_(cube.get_pos())
     eep = np.where(side_is_left[:, None], np_(ee["l"].get_pos()), np_(ee["r"].get_pos()))
     lift_cm = (lift_pos_z - root0[:, 2]) * 100
-    ch2 = spec.scaled_extents()[2] / 2
-    rxy = np.hypot(objf[:, 0] - bowx, objf[:, 1] - bowy)
     rim_z = tabZ + 2 * BOWL_HALF_H
-    # placed-XY tolerance from the SPEC: a cube's tight 6cm stays exactly 6cm (default place_xy_tol_cm=8 -> the
-    # cube path historically used a tighter 0.06; keep 0.06 for the cube, the spec tol for bigger objects whose
-    # bbox centre can rest a few cm off the bowl centre while the body still lies IN the bowl). Cap at the bowl
-    # mouth radius so it never accepts a target resting OUTSIDE the bowl.
-    place_r = 0.06 if spec.is_cube else min(0.085, max(0.06, spec.place_xy_tol_cm / 100.0))
-    # height band: a compact object's bbox centre rests near the bowl floor (< rim); an ELONGATED/flat target
-    # draped across the ~7.5cm bowl mouth rests with its bbox centre HIGHER (part of the body bridges the rim),
-    # so allow the centre up to ~one body-half above the rim for non-cube targets (still rejects a target perched
-    # well ABOVE the bowl or stuck on a finger -- the ee-distance test below catches the held case).
-    top_margin = 0.01 if spec.is_cube else float(ch2 + 0.02)
-    placed = (lift_cm > 3) & (rxy < place_r) & (objf[:, 2] - ch2 > tabZ - 0.005) & \
-             (objf[:, 2] - ch2 < rim_z + top_margin) & (np.linalg.norm(objf - eep, axis=1) > 0.08)
-    bottom = objf[:, 2] - ch2
-    wall_pen = (((rxy > 0.065) & (rxy < 0.11) & (bottom > tabZ + 0.012) & (bottom < rim_z)) | (bottom < tabZ - 0.015))
+    placed, _sm = score.score_placement(objf, eep, bowx, bowy, tabZ, rim_z, lift_cm, spec)
+    wall_pen = score.through_wall(objf, bowx, bowy, tabZ, rim_z, spec)
     print(f"[COLLECT] {int((lift_cm>3).sum())}/{N} grasped, {int(placed.sum())}/{N} placed, "
           f"through-wall={int(wall_pen.sum())}/{N}  render+sim {wall:.1f}s", flush=True)
 

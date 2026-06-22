@@ -10,8 +10,10 @@ Genesis-native is the right one for batched parallelism. (The earlier "~1 cm res
 SODA's analytic IK still runs on the REAL robot via soda-bimanual; the policy is sensor-only, so the collector's
 IK choice is invisible to it.
 
-Exposes the SAME ``solve(ee_pos, ee_quat, q_init) -> IKSolution`` interface the reusable skills expect, so
-``plan_pick_place`` / ``reachable_grasp_quat`` work unchanged.
+Exposes the SAME ``solve(ee_pos, ee_quat, q_init) -> IKSolution`` interface the reusable skills expect, so the
+grasp/place ORIENTATION + relax-tilt planning (``skills/grasp.py`` — ``select_grasp_tilt`` / ``grasp_quat_at`` /
+``cquat`` / ``select_place_tilt``) and the placement scorer (``skills/score.py``) work unchanged. (The earlier
+standalone ``skills/pick_place.py`` planner/scorer was the pre-de-closure version those modules superseded.)
 """
 from __future__ import annotations
 
