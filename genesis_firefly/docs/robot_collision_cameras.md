@@ -9,10 +9,11 @@ Everything here is sourced from the real code — quote, don't invent:
 | Concern | File |
 | --- | --- |
 | Dual-arm loader, 14-D layout, PD gains, gripper | `robots/firefly_dual.py` |
-| Collision options (firm rigid solver), world, tables, bowl | `scenes/firefly_scene.py` |
-| Cameras + visible side-camera rig | `scenes/firefly_cameras.py` |
-| Genesis-native IK adapter (the one actually used) | `robots/ik.py` |
-| SODA analytic IK bridge (reused, re-measured `_RZ_P90`) | `_core_vendored/soda_ik/ik.py` |
+| Collision options (firm rigid solver + per-object noslip), world, tables, bowl | `world/firefly_scene.py` |
+| Cameras + visible side-camera rig | `world/firefly_cameras.py` |
+| Genesis-native IK adapter (the one actually used in sim — PROVEN == SODA IK) | `robots/ik.py` |
+| Object spec → sim-entity builder (collision + texture) | `world/object_factory.py` |
+| SODA analytic IK bridge (real-robot only, via `soda-bimanual`) | (not vendored in this repo) |
 
 All paths below are relative to `/home/kaitianchao/Projects/Genesis_world_kaitian/genesis_firefly/`.
 
@@ -239,8 +240,8 @@ no fat single envelope. This is what "good mode" looks like:
 
 ### 3c. Firm rigid solver (the penetration fix)
 
-From `scenes/firefly_scene.py`, `firm_rigid_options()` reproduces RoboLab's PhysX firm-contact recipe
-(Newton solver, many iterations, low constraint timeconst, self-collision on):
+From `world/firefly_scene.py`, `firm_rigid_options()` reproduces RoboLab's PhysX firm-contact recipe
+(Newton solver, many iterations, low constraint timeconst, self-collision on, per-object `noslip_iterations`):
 
 ```python
 def firm_rigid_options(dt=0.01):
@@ -407,8 +408,10 @@ The existing **through-wall** metric (§ the wall_pen check) stays — a useful 
 
 ## 4. IK bridge
 
-Two IK paths exist. **The collector uses the Genesis-native one** (`robots/ik.py`); the SODA analytic
-solver (`_core_vendored/soda_ik/ik.py`) is reused/available and is what runs on the **real** robot.
+**The collector uses the Genesis-native IK** (`robots/ik.py`) — PROVEN identical to SODA's analytic IK
+(to 3 decimals, 0.00 mm residual), so it is kept for batched parallelism. The SODA analytic solver itself
+is no longer vendored in this repo; it runs on the **real** robot via `soda-bimanual` (the policy is
+sensor-only, so the collector's IK choice does not affect deployment).
 
 ### 4a. Genesis-native IK (default, used by the collector) — `robots/ik.py`
 
@@ -456,10 +459,15 @@ the entity at the solution config — harmless, since the collector then PD-comm
 For batched (N-env) collection you can also call Genesis's `entity.inverse_kinematics(pos=(N,3),quat=(N,4))`
 directly to solve all N grasp targets in one call.
 
-### 4b. SODA analytic IK bridge (reused; the re-measured `_RZ_P90`) — `_core_vendored/soda_ik/ik.py`
+### 4b. SODA analytic IK bridge — the re-measured `_RZ_P90` frame offset (real-robot reference; NOT vendored here)
 
-In-process wrapper around soda-bimanual's analytic `Kinematics` (one solver per arm), working in WORLD
-coordinates. No server / subprocess / ZMQ / second venv. This is what runs on the **real** robot.
+> **Note (current):** the SODA analytic IK is **no longer vendored in this repo** — the sim uses the
+> Genesis-native `robots/ik.py` (proven identical). This subsection is kept as the **real-robot reference**: the
+> SODA solver is what runs on the physical robot via `soda-bimanual`, and the `_RZ_P90` frame offset below is the
+> load-bearing constant for matching the sim `*_ee_link` frame to SODA's TCP frame.
+
+An in-process wrapper around soda-bimanual's analytic `Kinematics` (one solver per arm) works in WORLD
+coordinates. No server / subprocess / ZMQ / second venv.
 
 The one constant that had to be **re-measured** for Genesis is the frame offset between SODA's TCP frame and
 the sim's `*_ee_link` body frame. Origins coincide (round-trip pos 0.00 mm); the axes differ by exactly
@@ -497,7 +505,7 @@ class FireflyDualIK:
 
 ## 5. The 3 cameras + the visible side rig
 
-All in `scenes/firefly_cameras.py`. **Render keys: `cam_lw`, `cam_rw`, `cam_side`** (these are the LeRobot
+All in `world/firefly_cameras.py`. **Render keys: `cam_lw`, `cam_rw`, `cam_side`** (these are the LeRobot
 camera names). Resolution `RES = (640, 360)` (16:9, matches RoboLab).
 
 ### Conventions (important)

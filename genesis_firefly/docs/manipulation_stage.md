@@ -1,14 +1,14 @@
 # ManipulationStage — the reusable manipulation + rendering setup
 
-`scenes/manipulation_stage.py` is **THE** reusable "world" every Genesis Line-B manipulation task
+`world/manipulation_stage.py` is **THE** reusable "world" every Genesis Line-B manipulation task
 runs in. You build it **once** and never re-tune it. A task adds only its **objects + skill +
 scoring** on top. The robot, the cameras, the photoreal rendering, the immersive HDRI background
 domain-randomization, and the parallel-collecting harness are all **fully encapsulated** here — a
 task never touches any of it.
 
-- **Source:** `/home/kaitianchao/Projects/Genesis_world_kaitian/genesis_firefly/scenes/manipulation_stage.py`
-- **Reference task using it:** `/home/kaitianchao/Projects/Genesis_world_kaitian/genesis_firefly/collectors/pickplace_collector.py`
-- **Self-check:** `CUDA_VISIBLE_DEVICES=0 ./.venv/bin/python genesis_firefly/scenes/manipulation_stage.py`
+- **Source:** `/home/kaitianchao/Projects/Genesis_world_kaitian/genesis_firefly/world/manipulation_stage.py`
+- **Reference task using it:** `/home/kaitianchao/Projects/Genesis_world_kaitian/genesis_firefly/tasks/pickplace.py`
+- **Self-check:** `CUDA_VISIBLE_DEVICES=0 ./.venv/bin/python genesis_firefly/world/manipulation_stage.py`
 
 ---
 
@@ -57,7 +57,7 @@ Constructed as `FireflyDual(self.scene, pos=(0,0,arm_table_height), surface=gs.s
   not retune.
 
 ### Tables — two static collidable boxes
-Built directly from `TableLayout` (`scenes/firefly_scene.py`):
+Built directly from `TableLayout` (`world/firefly_scene.py`):
 - `self.atable` — the **arm table** (under the robot), depth `0.34`, colour `0.7 * table_color`.
 - `self.otable` — the **object table** (in front), depth `0.70`, the place surface; this is the entity
   a task moves to do table-height DR.
@@ -66,7 +66,8 @@ Both are `gs.morphs.Box(... fixed=True, collision=True)` with `gs.surfaces.Plast
 common width `0.90`, default top `z=0.25`.
 
 ### Cameras — 3 policy cameras + the visible side rig
-All four are **Nyx sensors** (`NyxCameraOptions`), all at `res=(320,180)`:
+All four are **Nyx sensors** (`NyxCameraOptions`), all at `res=RES=(640,360)` (16:9; short side 360 ≥ pi0.5's
+~224 input, so no upscaling):
 
 | key        | type                          | placement                                                            |
 |------------|-------------------------------|----------------------------------------------------------------------|
@@ -80,7 +81,7 @@ witness/tiling view, not a policy input. The wrist cams use `entity_idx`/`link_i
 so Nyx re-attaches them to `link_6` every render → truly **egocentric** (fingers-at-bottom, looking
 down). The visible **side-camera body + support stick** are added by `add_side_camera_rig(scene)`
 (real `camera_link.STL` D435i body at the calibrated pose + an 8 mm cylinder stick from the floor).
-Calibrated poses/FOV live in `scenes/firefly_cameras.py` and are baked, not tuned.
+Calibrated poses/FOV live in `world/firefly_cameras.py` and are baked, not tuned.
 
 ### Rendering — Nyx photoreal
 Path-traced, denoised PBR via `gs_nyx_plugin`. `SPP=32` samples/pixel (clean after denoise; override
@@ -90,22 +91,28 @@ which is what makes the wrist cams egocentric — see `render()`.
 
 ### Immersive per-env HDRI background DR
 **No ground plane.** Each of the N parallel envs renders its **own random real room**: the HDRI *is*
-the floor + walls + light, so the arm genuinely sits in a real lounge / office / bathroom, and the two
-tables are the only local surfaces. The stage picks one random 1K HDRI per env from `hdr_pool()` and
-hands the N-tuple of `EnvironmentMapAsset`s to every camera (`env_maps=...`); Nyx's per-env
+the floor + walls + image-based light, so the arm genuinely sits in a real lounge / office / bathroom,
+and the two tables are the only local surfaces. The stage picks one random HDRI per env and hands the
+N-tuple of `EnvironmentMapAsset`s to every camera (`env_maps=...`); Nyx's per-env
 `update_scene`/`set_env_map` renders each batched env with its own HDRI in **one build**. The stage
-also randomizes **table colours** (`self.table_color`).
+also draws a per-build **table texture** (`self.table_texture`) + table colours (`self.table_color`)
+and, with `full_dr=True`, the per-build scope-A/C scene DR (table-size grow, side-cam pose, key light).
+
+**HDRI resolution = 2K when `n_envs ≤ MAX_2K_ENVS` (45), else the 1K pool.** Build-batches keep E ≤ 45
+so each build renders at full **2K**; only a single >45-env build falls back to the 1K pool (Nyx
+segfaults past ~50–60 2K env maps — see "Why a 1K HDRI pool" below).
 
 ### One fully-parallel build of N envs
 `stage.build()` calls `self.scene.build(n_envs=self.n_envs, env_spacing=(0.0, 0.0))` — a single
 batched scene. `env_spacing=(0,0)` is mandatory so each env renders its own immersive room with no
 cross-env bleed. All N demos run, render, and score in parallel.
 
-### Why a 1K HDRI pool
-Nyx **segfaults** past ~50–60 **2K** env maps (50×2K builds, 80×2K core-dumps). The 100-env *scene*
-itself is fine; only the env-map memory crashes. `hdr_pool()` downsamples the 2K library to **1K**
-(¼ the memory) so all 100 per-env env maps fit in one build, cached under `/data3/hdr1k`. Corrupt 2K
-`.hdr` files are skipped (loading one would reintroduce a 2K map and crash).
+### Why a 1K HDRI pool (only for a single large >45-env build)
+Nyx **segfaults** past ~50–60 **2K** env maps (50×2K builds, 80×2K core-dumps). The large *scene*
+itself is fine; only the env-map memory crashes. For a single build with `n_envs > MAX_2K_ENVS` (45),
+`hdr_pool()` downsamples the 2K library to **1K** (¼ the memory) so all per-env env maps fit in one
+build, cached under `/data3/hdr1k`. Corrupt 2K `.hdr` files are skipped (loading one would reintroduce a
+2K map and crash). **The normal path is build-batches with E ≤ 45 → original 2K** (`valid_2k_pool()`).
 
 ---
 
@@ -129,19 +136,21 @@ boundary — Genesis `get_pos/get_quat/render` return CUDA tensors.
 ### `ManipulationStage`
 
 ```python
-ManipulationStage(n_envs, seed=0, res=RES, spp=SPP)
+ManipulationStage(n_envs, seed=0, res=RES, spp=SPP, noslip=0, full_dr=True)
 ```
-`RES=(320,180)`, `SPP` from env var (default 32). On construction it builds the per-env env maps,
-picks the table colours, creates `self.scene` (no plane), adds the robot + both tables + the side
-rig + the 4 Nyx cameras. **The scene is NOT built yet** — the task adds objects first, then calls
-`build()`.
+`RES=(640,360)`, `SPP` from env var (default 32). `noslip` = per-object `noslip_iterations` (for a
+round/thin grasp target; the task passes `spec.grasp_noslip`). `full_dr` (also gated by the `FULL_DR`
+env var) enables the per-build scope-A/C scene DR (table-size grow, side-cam pose, key light). On
+construction it draws the per-env HDRIs + the per-build table texture / colours / scene DR, creates
+`self.scene` (no plane), adds the robot + both tables + the side rig + the 4 Nyx cameras. **The scene
+is NOT built yet** — the task adds objects first, then calls `build()`.
 
 **Attributes (set in `__init__`):**
 
 | attr               | meaning                                                                 |
 |--------------------|-------------------------------------------------------------------------|
 | `.n_envs`          | number of parallel environments                                         |
-| `.res`, `.W`, `.H` | render resolution `(320,180)` and its width/height                      |
+| `.res`, `.W`, `.H` | render resolution `(640,360)` and its width/height                      |
 | `.rng`             | `np.random.RandomState(seed)` — the task's shared RNG                   |
 | `.scene`           | the `gs.Scene` (task adds objects to **this**)                          |
 | `.robot`           | the `FireflyDual` instance                                              |
@@ -151,6 +160,8 @@ rig + the 4 Nyx cameras. **The scene is NOT built yet** — the task adds object
 | `.cams`            | dict `{"third","cam_side","cam_lw","cam_rw"}` of Nyx sensors            |
 | `.hdrs`            | list of N HDRI paths (one per env) — record `basename` per demo         |
 | `.table_color`     | the chosen table RGB (objects must be distinct from it)                 |
+| `.table_texture`   | the per-build table-texture albedo path (both tables share it)          |
+| `.full_dr`         | whether the per-build scope-A/C scene DR is active                      |
 
 **Methods:**
 
@@ -201,8 +212,7 @@ import os, sys, numpy as np, genesis as gs
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(_HERE))                       # genesis_firefly/
-sys.path.insert(0, os.path.join(os.path.dirname(_HERE), "_core_vendored"))
-from scenes.manipulation_stage import ManipulationStage, np_     # the reusable setup
+from world.manipulation_stage import ManipulationStage, np_      # the reusable setup
 
 
 def collect(N, seed, data_dir, out_dir):
@@ -257,11 +267,14 @@ if __name__ == "__main__":
                      os.environ.get("OUT_DIR", "genesis_firefly/output/temp/<task>"))
 ```
 
-**See the real, working instance:** `collectors/pickplace_collector.py` — adds a coloured cube + a
-convex-decomposition bowl, does per-env physics DR in `sample_phys_dr`, plans an orientation-aware
-grasp + gentle release-above-rim place (vendored RoboLab skills + SODA IK), and writes the §4 HDF5 +
-3 policy-cam videos + tiles. Its `collect()` is the canonical example of every step above. Result at
-`N=100, seed=7`: **100/100 grasped, 98/100 placed, 0/100 through-wall, ~139 s** in one parallel build.
+**See the real, working instance:** `tasks/pickplace.py` — the THIN composer that spawns a target
+(`world/object_factory.py`) + a convex-decomposition bowl, applies the full DR (`dr/apply.py`), plans an
+orientation-aware grasp + gentle release-above-rim place via the reusable skills
+(`skills/grasp.py::grasp_action_wps` + `skills/place.py::place_action_wps`, optionally
+`skills/grasp_retry.py`), scores with `skills/score.py` + the `skills/penetration.py` gate, and writes
+the §4 HDF5 + 3 policy-cam videos + tiles. Its `collect()` is the canonical example of every step above.
+(Real, modern templates also use `world/object_factory.py` rather than hand-rolling `add_entity` — the
+cube-`add_entity` shown above is the minimal illustrative form.)
 
 ### Notes / gotchas for task authors
 - `gs.init(backend=gs.gpu)` — **not** `gs.cuda` (it logs "backend gs.cuda" at runtime, but the call is
@@ -286,7 +299,7 @@ grasp + gentle release-above-rim place (vendored RoboLab skills + SODA IK), and 
 ## 5. Self-check
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 ./.venv/bin/python genesis_firefly/scenes/manipulation_stage.py
+CUDA_VISIBLE_DEVICES=0 ./.venv/bin/python genesis_firefly/world/manipulation_stage.py
 ```
 
 Builds a 2-env stage (seed 1), settles 50 steps, renders, and writes a third-person frame to

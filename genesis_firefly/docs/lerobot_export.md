@@ -11,9 +11,13 @@ from the `--repo-id`.
 |---|---|
 | **Converter** | `genesis_firefly/dataio/convert_genesis_to_lerobot.py` |
 | **Interpreter** | `/home/kaitianchao/Projects/openpi_hex/.venv/bin/python` (has `lerobot==0.1.0`, `CODEBASE_VERSION=v2.1`) — the Genesis repo venv does **not** have `lerobot` |
-| **Source** | `/data3/genesis_fulldr/cube_fulldr_v2/` (`demos.hdf5` + `videos/cam_{side,lw,rw}/demo_<i>.mp4`) |
-| **Output** | `/data3/genesis_fulldr/lerobot/genesis_cube_fulldr_v2/` (the `HF_LEROBOT_HOME/<repo-id>` convention) |
-| **In-workspace preview** | `genesis_firefly/output/genesis_cube_fulldr_v2` symlink -> the /data3 output |
+| **Source** | a `/data3/genesis_fulldr/<dataset>/` (`demos.hdf5` + `videos/cam_{side,lw,rw}/demo_<i>.mp4`) — **current = `cube_fulldr_v3`** (200 demos, 197 placed); the `v2` examples below are historical |
+| **Output** | `/data3/genesis_fulldr/lerobot/genesis_<dataset>/` (the `HF_LEROBOT_HOME/<repo-id>` convention) |
+| **In-workspace preview** | `genesis_firefly/output/genesis_<dataset>` symlink -> the /data3 output |
+
+> **Current dataset:** the reference collection is now **`cube_fulldr_v3`** → `genesis_cube_fulldr_v3` (197 clean
+> episodes). The commands below show the original `cube_fulldr_v2` (200 ep) verbatim as the worked example; swap
+> `v2`→`v3` (or your dataset name) in `--source` / `--repo-id`. The procedure is identical.
 
 ## Why a separate converter (not the vendored `dataio/lerobot_exporter.py`)
 

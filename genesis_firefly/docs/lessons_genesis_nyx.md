@@ -9,13 +9,18 @@ not re-derive these; do not regress them.
 - Engine: **Genesis 1.1.2 + torch 2.7.0+cu128**, editable install (`pip install -e .`),
   branch `genesis_firefly`. Photoreal renderer: **Nyx** (`pip install gs-nyx-plugin`,
   prebuilt wheel — NOT LuisaRender, whose `ext/LuisaRender` submodule is empty).
-- Our code lives entirely under `genesis_firefly/`. Key files referenced here:
-  - `scenes/manipulation_stage.py` — the reusable robot + cameras + Nyx + env-DR world.
-  - `scenes/firefly_scene.py` — `firm_rigid_options()`, tables, `build_bowl()`.
-  - `scenes/firefly_cameras.py` — calibrated cam poses, side-camera rig.
+- Our code lives entirely under `genesis_firefly/`. Key files referenced here (current paths):
+  - `world/manipulation_stage.py` — the reusable robot + cameras + Nyx + env-DR world.
+  - `world/firefly_scene.py` — `firm_rigid_options()`, tables, `build_bowl()`.
+  - `world/firefly_cameras.py` — calibrated cam poses, side-camera rig.
+  - `world/object_factory.py` — the spec→sim-entity builder (collision + texture).
   - `robots/firefly_dual.py` — `FireflyDual` loader, gains, dof maps.
-  - `collectors/pickplace_collector.py` — the single-build parallel collector.
+  - `tasks/pickplace.py` — the single-build parallel task (thin composer).
   - `scripts/bake_firefly_livery.py`, `scripts/bake_soma_panels.py` — the GLB bakers.
+
+> Path note: this logbook predates the `scenes/→world/`, `collectors/→tasks/` reorg; inline mentions of
+> `scenes/…` / `collectors/pickplace_collector.py` below mean today's `world/…` / `tasks/pickplace.py`. The
+> SYMPTOM→ROOT-CAUSE→FIX content is current — do not regress it.
 
 > **Standing rule (owner #1):** collision is first-class — what can't happen in reality
 > must not happen in sim. **MEASURE** penetration and render a **CLOSE-UP** on the

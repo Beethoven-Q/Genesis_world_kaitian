@@ -10,26 +10,39 @@ phase lands. Requirements live in [project_overview.md](project_overview.md) (bl
 ## Phases (the framework build-out)
 - **P1 — Smooth motion + cameras + backgrounds** *(DONE, verified)*: smooth/gentle motion path, wrist-cam
   gripper fix, 2K immersive backgrounds.
-- **P0 — Repo reorg** *(next)*: `world/ · dr/ · skills/ · registry/ · tasks/ · io/ · runner/` + `.claude/
-  agents/ + .claude/workbooks/`; dissolve `_core_vendored`, delete dead code, fix imports. Gate: pickplace parity.
-- **P2 — Full-DR harness**: table **TEXTURE** pack (≥10 incl. florals), object color/size/type, **distractor
-  objects** (2–3 random clutter, real physics, collision-free planning), all scopes A/B/C; per-build vs per-env;
-  per-demo `DRPlan` → HDF5.
-- **P3 — Build-batch orchestration**: B subprocess builds × E envs, half-left/half-right, merge shards; **/data3
-  storage + output symlink**. → the **200-trial full-DR collection**.
-- **P4 — Agency**: DR subagent + workbook; object-refiner agent; the virtual-EE skill.
-- **P5 — More objects + Line C**: solve apple / tennis-ball / banana / marker-pen pick-place; then **Line C
-  dexterous-hand integration** (candidate for a dedicated worktree-isolated subagent).
+- **P0 — Repo reorg** *(DONE)*: `world/ · dr/ · skills/ · registry/ · tasks/ · dataio/ · runner/` + `.claude/
+  agents/ + .claude/workbooks/`; `_core_vendored` dissolved, dead code deleted, imports fixed. Pickplace parity held.
+- **P2 — Full-DR harness** *(DONE — now FULLY applied)*: table **TEXTURE** pack (≥10 incl. florals), object
+  color/size/type, **distractor objects** (2–3 random clutter, real physics, collision-free placement), ALL scopes
+  A/B/C; per-build vs per-env (light = per-build, the honest Nyx limit); per-demo `dr_*` trace → HDF5.
+- **P3 — Build-batch orchestration** *(DONE)*: `runner/orchestrate.py` B subprocess builds × E envs, half-left/
+  half-right, merge shards; **/data3 storage + output symlink**. → the **`cube_fulldr_v3` 200-trial collection**.
+- **P4 — Agency** *(MVP done)*: DR-strategist subagent + workbook; object-refiner agent + `registry/refine.py`;
+  the virtual-EE skill is STILL the open item.
+- **P5 — More objects + modularity + grasp-retry** *(DONE)*: apple / tennis-ball / banana / pen pick-place SOLVED
+  (real native textures); the agent-native modularity refactor (object_factory + grasp/place ACTIONS + score +
+  distractors → skills; thin task; `dr/` package); object-shove disturbance ABANDONED → object-agnostic
+  `skills/grasp_retry.py`. **Line C dexterous-hand integration** (`docs/line_c_aero_plan.md`) is planned, NOT started.
+- **P6 — Scale + 2nd task** *(next)*: per-object full-DR datasets → pi0.5 fine-tune + sim-to-real eval; the
+  virtual-EE skill → a 2nd task (mug-hang / book↔bookshelf / water-pour); then Line C on a new branch.
 
 ## Emerging reusable skills (build + name as we go)
 - `BatchExecutor` (`skills/executor.py`) — the ONE smooth motion path (densify + batch IK, gentle everywhere).
-- `plan_pick_place` / `reachable_grasp_quat` / `score_pick_place` — pick-place + physical scoring.
-- `virtual_ee` *(planned)* — treat an object feature (mug ring center+normal, screw tip, peg) as a virtual EE →
-  threading / screwing / pegging.
+  *(built)*
+- **Grasp + place ACTIONS** — `skills/grasp.py::grasp_action_wps` (home→pre→at→close→lift) +
+  `skills/place.py::place_action_wps` (carry→lower→release→retract→go_home). De-closured, byte-identical; any
+  grasp-based task composes them. *(built)*
+- **`score`** (`skills/score.py`) — the SPEC-AWARE placement verdict (`score_placement`) + the `through_wall`
+  geometric diagnostic. *(built; replaced the old `score_pick_place` in the now-deleted `pick_place.py`)*
+- **`distractors`** (`skills/distractors.py`) — corridor-aware clutter PLACEMENT (the task passes its keep-outs;
+  the planner does no obstacle avoidance, so collision-freeness is by placement). *(built)*
+- **`grasp_retry`** (`skills/grasp_retry.py`) — OBJECT-AGNOSTIC opt-in miss→retry (target-noise → god-mode check →
+  re-grasp at the true re-read pose); default OFF, byte-identical clean path. *(built — see `docs/grasp_retry.md`)*
+- `virtual_ee` *(planned, NOT built)* — treat an object feature (mug ring center+normal, screw tip, peg) as a
+  virtual EE → threading / screwing / pegging.
 - `penetration` (`skills/penetration.py`) — faithful batched solid-solid interpenetration monitor read straight
   from the solver contact buffer (`max_penetration` / `abnormal_penetration` / `PenetrationTracker`); the owner
   #1 collision gate that rejects any demo with abnormal penetration. *(built — see §3g + progress log)*
-- (more: collision-free planning around distractors.)
 - **Grasp skill** (`skills/grasp.py`) — the low-level orientation primitives (`orientation_aware_grasp_quat`,
   `tilted_base_quat`, `transport_quats`, `world_long_axis`, …) PLUS the higher-level per-env grasp/carry
   ORIENTATION + RoboLab-faithful WRIST-MARGIN relax-tilt PLANNING: `GraspContext` (the immutable per-collect
@@ -42,6 +55,30 @@ phase lands. Requirements live in [project_overview.md](project_overview.md) (bl
   gets the verified collision + recognizable-texture behaviour with no copy-paste fork. *(built — see progress log)*
 
 ## Progress log
+- **2026-06-22 — MODULARITY + DR refactor COMPLETE; disturbance erased; thin task. (commits 349ac4e → 8d14219).**
+  A run of agent-native refactors that left the framework clean, modular, and the DR spec fully applied — each step
+  gated byte-identical / parity-verified before commit:
+  - `349ac4e` **Remove abandoned object-shove disturbance** (code + docs). It coupled to each object's physics
+    (pen NaN-crash, apple flung, banana penetration → per-object tuning, doesn't scale) and an xy-only shove
+    prediction misaligned the re-grasp on the rotated object. Erased entirely.
+  - `c94aa45` **Object-agnostic grasp-retry** (`skills/grasp_retry.py`) + 4 owner fixes — the disturbance
+    replacement: put the imprecision in the ROBOT's TARGET (action space), opt-in `NOISE_RETRY` (default OFF →
+    byte-identical), bimodal target-noise (small jitter + big clean-miss), god-mode check, re-grasp at the TRUE
+    re-read pose AND orientation. cube/banana/pen 100% placed after retry, apple/tennis ~92%, 0 abnormal pen. Doc:
+    `docs/grasp_retry.md`.
+  - `089c7fb` **Modularize grasp/place into reusable skills** — the last closures (`pick_wps`/`place_tail`)
+    extracted to `skills/grasp.py::grasp_action_wps` + a new `skills/place.py::place_action_wps` (waypoints
+    byte-identical, AST + 2000-input diff verified). The task's pick/place + the grasp-retry both call the skills.
+  - `06a3c24` **DR refactor 1/4** — extract DR into a reusable, task-agnostic **`dr/` package** (`scopes.py` A+C ·
+    `object_dr.py` B · `sampler.py` split → BuildDR + EnvDR · `apply.py` · `plan.py` trace), byte-identical parity.
+  - `eb77800` **DR refactor 2/4** — apply the 6 missing DR fields (object-table size grow, side-cam height/pitch,
+    table friction, object size, object friction, light) → **the DR spec is now FULLY applied**. The one honest
+    limit is per-env→per-build light (Nyx can't set the directional light per-env; the HDRI supplies per-env
+    image-based lighting).
+  - `61e3ade` + `8d14219` **Modularity 3+4/4** — extract the spec-aware scorer (`skills/score.py`) + the
+    corridor-aware clutter placement (`skills/distractors.py`) into skills; **DELETE the dead, duplicate
+    `skills/pick_place.py`**; slim `tasks/pickplace.py` to a thin composer (**1156 → 978 lines**). `registry/refine.py`
+    kept standalone (a coherent ASSET2SIM object-refiner tool).
 - **2026-06-21 — Grasp + place ACTIONS extracted into skills (agent-native modularity).** The per-env grasp
   MOTION and place MOTION were the last waypoint builders still living as CLOSURES in `tasks/pickplace.py`
   (`pick_wps` / `place_tail`). Extracted them into REUSABLE de-closured skill functions so a future grasp-based

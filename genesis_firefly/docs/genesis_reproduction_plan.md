@@ -1,5 +1,13 @@
 # Two-Line Plan: RoboLab(IsaacLab) rigid scale-up  +  Genesis full reproduction → deformables/fluids
 
+> **⚠️ HISTORICAL PLANNING DOC (kept for provenance — do NOT treat as current).** This is the ORIGINAL two-line
+> plan written before the build. Its proposed layout (`scenes/`, `collectors/`, `_core_vendored/`,
+> `skills/pick_place.py`, `plan_pick_place`/`score_pick_place`) was the *plan*; the as-built architecture diverged.
+> For the CURRENT state read [project_overview.md](project_overview.md) (blueprint) + [roadmap.md](roadmap.md)
+> (progress) + [README.md](README.md) (repo layout). Notably: `scenes/→world/`, `collectors/→tasks/`,
+> `_core_vendored` dissolved, `skills/pick_place.py` was extracted into `skills/{grasp,place,score}.py` then
+> DELETED, and the DR lives in the reusable `dr/` package.
+
 > On approval, this plan is saved as a durable markdown at **`/home/kaitianchao/Projects/genesis_reproduction_plan.md`**
 > (parallel to RoboLab), and copied into the new Genesis project's `docs/`. Project-folder name
 > `genesis_firefly` below is a placeholder — rename freely (it must NOT be called "RoboLab_*", since

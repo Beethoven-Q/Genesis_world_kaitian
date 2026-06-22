@@ -13,8 +13,8 @@ path, and failure mode below is quoted from the actual code.
 > prebuilt Apache-2.0 wheel — no CUDA-toolkit compile). Proven on Driver 580 / RTX A6000.
 
 Authoritative code for everything here:
-- `genesis_firefly/scenes/manipulation_stage.py` — the reusable render+DR stage (Nyx setup, HDRI DR, matte override).
-- `genesis_firefly/scenes/firefly_cameras.py` — the 3 policy cameras, wrist offsets, side-rig.
+- `genesis_firefly/world/manipulation_stage.py` — the reusable render+DR stage (Nyx setup, HDRI DR, matte override).
+- `genesis_firefly/world/firefly_cameras.py` — the 3 policy cameras, wrist offsets, side-rig.
 - `genesis_firefly/robots/firefly_dual.py` — loads the **livery** URDF and applies the matte surface.
 - `genesis_firefly/scripts/bake_firefly_livery.py` — bakes per-link colour into GLBs + a livery URDF.
 - `genesis_firefly/scripts/bake_soma_panels.py` — bakes the two-colour link_2/link_3 carbon panels.
@@ -165,7 +165,9 @@ _HDRS_2K = sorted(glob.glob(f"{_BG_DIR}/indoors/*.hdr") + glob.glob(f"{_BG_DIR}/
 > core-dumps). The *scene* is fine — a 100-env scene builds in ~18s with one env map; only the
 > env-map **memory** crashes.
 
-**Fix: downsample to 1K (¼ the memory).** All 100 per-env env maps then fit in one build
+**Fix: downsample to 1K (¼ the memory) — but only for a single large build.** The DEFAULT path is
+now **build-batches with E ≤ `MAX_2K_ENVS` (45) → original 2K** (`valid_2k_pool()`); only a single
+build with `n_envs > 45` falls back to the 1K pool, where all per-env env maps then fit in one build
 (verified 100@1K builds in ~22s). The stage maintains a lazily-built, cached 1K pool under
 `/data3/hdr1k`:
 
@@ -454,7 +456,7 @@ URDF when present, plain otherwise). **Verify with pixel sampling, not the naked
 
 `manipulation_stage.py` renders a third-person frame to `/tmp`:
 ```bash
-CUDA_VISIBLE_DEVICES=0 ./.venv/bin/python genesis_firefly/scenes/manipulation_stage.py
+CUDA_VISIBLE_DEVICES=0 ./.venv/bin/python genesis_firefly/world/manipulation_stage.py
 # -> /tmp/stage_selfcheck.png ; prints STAGE_OK + the per-env room names
 ```
 

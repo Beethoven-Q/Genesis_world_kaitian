@@ -118,18 +118,21 @@ subagent so the agent gets fluent and eventually autonomous.
 │   robot (dual Firefly Y6 + GR100, baked SOMA livery, convex-DECOMPOSED "good-mode"     │
 │          collision)  ·  2 collidable tables  ·  3 photoreal cameras (2 wrist D405 +     │
 │          1 side D435i) + visible side rig  ·  Nyx path-traced PBR  ·  per-env immersive │
-│          HDRI background + light  ·  dexterity-aware IK  ·  smooth motion executor  ·    │
-│          fully-parallel build                                                          │
+│          HDRI background (image-based light) + per-build key light  ·  dexterity-aware  │
+│          IK  ·  smooth motion executor  ·  fully-parallel build                        │
 ├──────────────────────────────────────────────────────────────────────────────────────┤
 │ FULL-DR HARNESS (+ DR subagent + workbook) — AUTOMATIC for every task; see              │
 │   domain_randomization.md.  scope A (scene) + scope C (visual) apply for free; scope B   │
 │   (object/task) per task.                                                               │
 ├──────────────────────────────────────────────────────────────────────────────────────┤
-│ SKILLS (reusable, pure-numpy)  grasp · pick_place · trajectory + smooth executor ·       │
-│   virtual_ee (re-frame a feature as the EE → threading/screwing/pegging) · penetration   │
+│ SKILLS (reusable, pure-numpy, single-responsibility — compose, never fork)               │
+│   grasp (orientation/relax-tilt planning + grasp_action_wps) · place (place_action_wps)   │
+│   · grasp_retry (object-agnostic miss→retry) · trajectory + executor (the smooth motion)   │
+│   · score (spec-aware placement verdict) · distractors (corridor-aware clutter) ·          │
+│   penetration (the #1 collision gate)                                                      │
 ├──────────────────────────────────────────────────────────────────────────────────────┤
-│ TASK (THIN, ~70 lines)  objects + a skill + a scorer + which scope-B fields apply.       │
-│   Never touches robot / cameras / rendering / background / collision / IK / DR engine.   │
+│ TASK (THIN composer)  objects + a skill + a scorer + which scope-B fields apply.          │
+│   Never touches robot / cameras / rendering / background / collision / IK / DR engine.     │
 └──────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -139,10 +142,11 @@ subagent so the agent gets fluent and eventually autonomous.
 The main agent never re-derives infrastructure; it *calls* harnesses:
 
 - **ManipulationStage harness** (`world/manipulation_stage.py`): one object owns the robot (livery + good-mode
-  collision), the 2 tables, the side-camera rig, the 3 policy cameras + 1 third-person camera, the Nyx photoreal
-  renderer, per-env immersive HDRI background + light, and the parallel build. Methods: `.build()`,
-  `.settle_home()`, `.render()`. The task just adds its objects and reads cameras. **"Set up the scene/robot/
-  cameras/rendering/IK correctly" is a solved, reused call — not per-task work.**
+  collision), the 2 tables, the side-camera rig, the 3 policy cameras + 1 third-person witness camera, the Nyx
+  photoreal renderer, per-env immersive HDRI background (image-based light) + the per-build directional key light,
+  and the parallel build. Methods: `.build()`, `.settle_home()`, `.render()`. The task just adds its objects and
+  reads cameras. **"Set up the scene/robot/cameras/rendering/IK correctly" is a solved, reused call — not per-task
+  work.**
 - **Object factory** (`world/object_factory.py`): the ONE shared place that builds any `ObjectSpec` into a sim
   entity — collision (faithful convex decomposition or single hull) + visual + native UV texture — for **every**
   task. A task calls `spawn_target(...)` (the grasp target) / `spawn_distractors(...)` (clutter) / `build_object(...)`
@@ -155,12 +159,21 @@ The main agent never re-derives infrastructure; it *calls* harnesses:
   the smallest forward tilt keeping the wrist off its limit & the elbow bent through the binding frames). These were
   extracted out of `tasks/pickplace.py`'s `collect()` (where they
   were closures) into PURE functions over an immutable **`GraspContext`** (the per-collect bundle, built once) plus
-  an explicit `solve`/`gqA` — so any task gets the SAME natural-posture planning with no copy-paste fork.
-- **Full-DR harness** (`dr/`, + the DR subagent): encodes the *complete* DR spec once and applies it. See §4.
-- **Dexterity-aware IK** (`robots/ik.py` + `skills/pick_place.py`): Genesis-native sub-mm IK targeting the tool
-  frame, wrapped by `reachable_grasp_quat`/`reachable_place_quat` (prefer top-down, relax to the smallest tilt
-  that keeps the arm IK-solvable **and dexterous** — away from full extension/singularity). This is what keeps
-  motion accurate and jerk-free near the workspace boundary.
+  an explicit `solve`/`gqA` — so any task gets the SAME natural-posture planning with no copy-paste fork. The grasp
+  + place **ACTIONS** (the waypoint shapes) are likewise extracted: `skills/grasp.py::grasp_action_wps`
+  (home→pre→at→close→lift) and `skills/place.py::place_action_wps` (settle+re-yaw→carry→lower→release→retract→
+  go_home). A future pick-place-style task imports + composes them rather than reproducing the shape.
+- **Grasp-retry skill** (`skills/grasp_retry.py`): the OBJECT-AGNOSTIC, opt-in miss→retry augmentation (put the
+  imprecision in the robot's TARGET, never the object). Default OFF → byte-identical clean path. See §6 + the
+  [grasp_retry.md](grasp_retry.md) doc.
+- **Full-DR harness** (`dr/`, + the DR subagent): encodes the *complete* DR spec once and applies it — and the
+  spec is now FULLY applied (every field, no aspirational gaps). See §4.
+- **Dexterity-aware IK** (`robots/ik.py`): Genesis-native sub-mm IK targeting the tool frame. The grasp skill's
+  relax-tilt selection (`select_grasp_tilt`/`select_place_tilt`) prefers top-down and relaxes to the smallest tilt
+  that keeps the arm IK-solvable **and dexterous** (off the wrist limit, off full extension). This is what keeps
+  motion accurate and jerk-free near the workspace boundary. (Genesis IK == SODA IK, PROVEN identical to 3 dp /
+  0.00mm residual — kept for batched parallelism; the over-stretch was top-down-lift wrist saturation, not the
+  solver, fixed by the relax-tilt + `LIFT 0.18→0.10`.)
 - **Smooth motion executor** (`skills/executor.py`): the ONE motion path — densify sparse EE waypoints into
   constant-Cartesian-speed, SLERP'd, smoothstep-eased motion with gripper dwell ramps; batch-IK per step; the
   unused arm holds home. Gentle and slow *everywhere* (approach, grasp, transport, place) — the RoboLab motion
@@ -174,10 +187,19 @@ object/task, scope C visual — every field, range, and per-build-vs-per-env var
 anti-coupling rules). Summary of the design:
 - Scopes **A (manipulation-stage)** and **C (visual background)** are **shared across all tasks** and applied
   automatically. Scope **B (object/task)** is per-object/per-task.
+- **The spec is now FULLY applied** — the `dr/` package (`scopes.py` A+C · `object_dr.py` B · `sampler.py` ·
+  `apply.py` · `plan.py`) samples and applies *every* documented field, including the once-missing ones
+  (object-table size grow, side-cam height/pitch, table friction, object size, object friction, light). A task
+  inherits scopes A+C for free and names only its scope-B fields via its `TaskSpec`.
 - The hard renderer constraint (Nyx bakes color/texture/size at build) → **build-batches**: B parallel
   subprocess builds (each one {table-texture, object-colors, object-sizes, object-type, table-size, side-cam
-  pose}) × E envs (each env: pose, mass, friction, damping/stiffness, fill, table-height, HDRI, light). Every
+  pose, **light**}) × E envs (each env: pose, mass, friction, damping/stiffness, fill, table-height, HDRI). Every
   trial is fully randomized while staying parallel.
+- **The one honest limit — light is PER-BUILD, not per-env.** Per-env light is INFEASIBLE in Nyx: the per-env
+  render loop can only switch the env-map (`set_env_map(env_index)`); the directional key light bakes at build and
+  has no `set_light(env_index)`. The **HDRI already supplies per-env image-based lighting** (each env is its own
+  room with that room's light), so per-env illumination variety is preserved — only the directional *key* light is
+  per-build (still varied across build-batches).
 
 **The DR subagent (`dr-strategist`)** is the professional that the main agent delegates randomization to:
 - it **reads the full DR requirement set**, **selects the fields relevant to the current task** (scopes A+C
@@ -193,32 +215,45 @@ See [agents.md](agents.md) for the exact agent contracts.
 
 ---
 
-## 5. Near-future harnesses / subagents (designed now, built as we go)
-The framework is **extensible** — new harnesses/agents slot in. Planned next:
+## 5. The agency layer (subagents — some built, more to come)
+The framework is **extensible** — new harnesses/agents slot in. Built + planned:
 
-- **Object-refiner agent** — makes an object *physically and visually real*: refine its URDF (geometry,
-  materials), **label trackable keypoints** (e.g. the mug handle ring's **center + normal**, a cap's axis, a
-  drawer handle) into `ObjectSpec.keypoints` for skills like the virtual-EE, and run a **collision audit**:
-  hollow parts stay hollow (convex-**DECOMPOSITION**, not a single filling hull), solid parts never interpenetrate
-  under firm grip. Output: a realistic, keypoint-annotated, collision-correct object the registry can use.
+- **Object-refiner agent + harness `registry/refine.py`** [BUILT — MVP] — makes an object *physically and
+  visually real* BEFORE it enters the registry: AUGMENT (mesh analysis) → INFER physics → GOOD COLLISION
+  (convex-**DECOMPOSITION** so hollow stays hollow, never a single filling hull) → VERIFY (reuse
+  `skills/penetration.py` + an init-stability settle + a hollow-probe), and **label trackable keypoints** (the mug
+  handle ring's **center + normal**, a cap axis, a peg tip) into `ObjectSpec.keypoints` (the virtual-EE frames).
+  Demonstrated end-to-end on the YCB mug (hollow ring + hollow cup mouth → SIM-READY). Kept STANDALONE (it is a
+  coherent ASSET2SIM tool). Full spec: [object_refiner.md](object_refiner.md).
+- **DR-strategist agent + workbook** [BUILT — MVP] — owns the full-DR ranges + the recognizability/colour policy;
+  reads the spec, selects scope-B fields, recommends realistic MAX-extent ranges, and learns from the per-demo
+  `dr_*` HDF5 trace via its `dr_workbook.md`. See §4 + [agents.md](agents.md).
 - **More to come** — e.g. a task-authoring agent that masters the §1 loop end-to-end, a camera/viewpoint agent,
   a scene-composition agent. Each new agent follows the same pattern: a narrow contract + a workbook that
   accumulates experience → trends to autonomy.
 
 ---
 
-## 6. Reusable skills + the virtual-EE abstraction
-Skills are pure-numpy and object-agnostic, promoted from RoboLab: `grasp` (orientation-aware grasp quats,
-transport quats, tilted-base), `pick_place` (`plan_pick_place`, `reachable_grasp/place_quat`, `score_pick_place`),
-`trajectory`+`executor` (the smooth motion), `penetration` (wall-penetration metric).
+## 6. Reusable skills (single-responsibility, pure-numpy, compose-never-fork)
+The skills are pure-numpy, object-agnostic, single-responsibility modules a thin task composes. The current set:
 
-The **main agent develops its own reusable skills**. The flagship abstraction is the **virtual end-effector**
-(`virtual_ee.py`): declare that some **feature** of an object is the frame the planner controls — e.g. the
-**mug-handle ring's center + normal**. Then "thread the ring onto a hanger branch" reuses `plan_pick_place` + the
-smooth executor with the ring as the controlled EE. The *same* skill generalizes to **screwing in screws,
-pegging-in-hole, key-in-lock** — any "align a feature frame to a target frame and insert." Keypoints come from
-`ObjectSpec.keypoints` (populated by the object-refiner agent). Skills, once proven, are extracted and reused
-across tasks.
+| skill | what it owns |
+|---|---|
+| `grasp.py` | orientation primitives + the per-env grasp/carry ORIENTATION + WRIST-MARGIN relax-tilt PLANNING (`GraspContext`, `grasp_quat_at`/`cquat`, `select_grasp_tilt`/`select_place_tilt`, + `_at` variants for re-read recovery poses) + the grasp ACTION `grasp_action_wps` (home→pre→at→close→lift) |
+| `place.py` | the place ACTION `place_action_wps` (settle+re-yaw→carry→lower→release→retract→go_home); carry quat passed in by the caller |
+| `grasp_retry.py` | OBJECT-AGNOSTIC opt-in miss→retry (target-noise → god-mode check → re-grasp at the true re-read pose); default OFF, byte-identical clean path |
+| `trajectory.py` | `densify` (constant-speed + SLERP + ease) + the `max_move_steps` cap (a degenerate waypoint can't dominate T) |
+| `executor.py` | `BatchExecutor` — the ONE smooth motion path (densify + batch-IK per step; the unused arm holds home) |
+| `score.py` | the SPEC-AWARE pick-place placement verdict (`score_placement`) + the `through_wall` geometric diagnostic |
+| `distractors.py` | corridor-aware clutter PLACEMENT (the task passes its keep-out corridors; the planner does NO obstacle avoidance, so collision-freeness is achieved by placement) |
+| `penetration.py` | the #1 collision GATE — faithful per-env solid-solid overlap from the solver buffer (`max_penetration`/`abnormal_penetration`/`PenetrationTracker`, `ABNORMAL_THRESH_M`=7mm) |
+
+**Planned next — the virtual end-effector (`virtual_ee.py`, NOT built yet).** Declare that some **feature** of an
+object is the frame the planner controls — e.g. the **mug-handle ring's center + normal**. Then "thread the ring
+onto a hanger branch" reuses the grasp/place actions + the smooth executor with the ring as the controlled EE.
+The *same* skill generalizes to **screwing in screws, pegging-in-hole, key-in-lock** — any "align a feature frame
+to a target frame and insert." Keypoints come from `ObjectSpec.keypoints` (populated by the object-refiner agent,
+already verified live on the YCB mug). Skills, once proven, are extracted and reused across tasks.
 
 ---
 
@@ -229,10 +264,10 @@ across tasks.
   R_grip]`.
 - **3 RGB streams** (the sensor-only policy input): side D435i + left/right wrist D405. LeRobot/OpenPI names:
   `observation.images.cam_high ← side`, `cam_left_wrist ← left wrist`, `cam_right_wrist ← right wrist`.
-- **Per-demo `DRPlan`** (frozen JSON of every sampled DR value) in the demo attrs → fully traceable for
-  sim-to-real *and* the substrate the DR subagent learns from.
-- **Physical success** filtering (§1). **LeRobot v2** export (`io/lerobot_exporter.py`, `success_only=True`) →
-  pi0.5 fine-tune.
+- **Per-demo DR trace** (`dr_*` attrs, every sampled DR value written by `dr/plan.py`) in the demo attrs → fully
+  traceable for sim-to-real *and* the substrate the DR subagent learns from.
+- **Physical success** filtering (§1). **LeRobot v2.1** export (`dataio/convert_genesis_to_lerobot.py`,
+  `success_only=True`) → pi0.5 fine-tune. See [lerobot_export.md](lerobot_export.md).
 - **2×2 four-view preview tile (REQUIRED for every collection):** every run writes a **2×2 tile video** —
   third-person · side(D435i) · left-wrist(D405) · right-wrist(D405) — for a sampled set of demos, plus a √N
   third-person grid, so a human can eyeball motion/grasp/placement quality at a glance. This is the standard QA
@@ -279,40 +314,49 @@ a per-dataset flag (e.g. 30×10, 50×20). One sim process per GPU.
 
 ---
 
-## 9. Repo layout
+## 9. Repo layout (current)
 ```
-world/        manipulation_stage.py · layout.py · object_factory.py · cameras.py · backgrounds.py   (the SETUP)
-robots/       firefly_dual.py · ik.py · bake_*.py                                                    (the robot)
-dr/           spec.py · scopes.py · object_dr.py · sampler.py · apply.py · plan.py                   (DR harness)
-skills/       grasp.py · pick_place.py · trajectory.py · executor.py · virtual_ee.py · penetration.py
-registry/     object_spec.py(+keypoints) · tasks.py(TaskSpec)
-tasks/        _base.py · pickplace.py (reference) · (future: mug_hang.py, pour.py)                   (THIN tasks)
-dataio/                hdf5_writer.py · lerobot_exporter.py
-runner/       collect.py (one build) · orchestrate.py (B subprocess builds → merge shards)
-assets/       robots/ · objects/ · textures/ (≥10 table textures) · backgrounds (HDRI pool)
+world/        manipulation_stage.py · firefly_scene.py · firefly_cameras.py · object_factory.py      (the SETUP)
+robots/       firefly_dual.py · ik.py · livery.py · bake_*.py                                          (the robot)
+dr/           scopes.py(A+C) · object_dr.py(B) · sampler.py(TaskSpec+split) · apply.py · plan.py · sweep.py  (DR harness)
+skills/       grasp.py · place.py · grasp_retry.py · trajectory.py · executor.py · score.py · distractors.py · penetration.py
+registry/     object_spec.py(+keypoints) · constants.py · refine.py(object-refiner harness) · demo_mug.py · demo_partnet_naming.py
+tasks/        pickplace.py (the reference THIN composer)  · (future: mug_hang.py, pour.py)            (THIN tasks)
+dataio/       convert_genesis_to_lerobot.py (HDF5 → LeRobot v2.1) · lerobot_exporter.py (vendored)
+runner/       collect.py (one build) · orchestrate.py (B subprocess builds → merge shards) · README.md
+assets/       robots/ · objects/ · textures/ (≥10 table textures) · (HDRI pool reused from RoboLab_firefly)
 docs/         project_overview.md (this) · domain_randomization.md · agents.md · manipulation_stage.md · …
 .claude/agents/      dr-strategist.md · object-refiner.md
-.claude/workbooks/   dr_workbook.md
+.claude/workbooks/   dr_workbook.md · object_refiner_workbook.md
 ```
+> Planned but not yet built: `skills/virtual_ee.py`, a declarative `TaskSpec` registry beyond the `dr/sampler.py`
+> one (the cube→bowl task currently wires its scope-B fields inline), and additional task files.
 
 ## 10. Adding a new task (the whole contract)
 1. Add/confirm the object(s) in `registry/object_spec.py` (extents, mass, grasp dz, keypoints, …) — the
-   object-refiner agent can produce these.
-2. Add a `TaskSpec` in `registry/tasks.py`: objects, skill, scorer, which scope-B fields apply.
-3. Write `tasks/<task>.py` (~70 lines): sample DR (DR subagent) → build the stage → spawn objects → apply env DR
-   → plan with a skill (often `plan_pick_place`, possibly via a `VirtualEE`) → `BatchExecutor.run` → score →
-   write HDF5. Follow the §1 loop: deterministic first, then DR, then scale, then fine-tune/eval.
+   object-refiner agent (`registry/refine.py`) can produce these.
+2. Name which scope-B DR fields apply via a `TaskSpec` (`dr/sampler.py`); scopes A + C come free.
+3. Write a THIN `tasks/<task>.py` composer: build the stage → spawn objects (`world/object_factory.py`) →
+   `dr.apply_build_dr` / `dr.apply_env_dr` → plan with skills (`grasp.grasp_action_wps` + `place.place_action_wps`,
+   optionally `grasp_retry`, later a `virtual_ee`) → `BatchExecutor.run` → `score.score_placement` +
+   `penetration` gate → write HDF5. Follow the §1 loop: deterministic first, then DR, then scale, then
+   fine-tune/eval.
 4. `runner/collect.py` to validate one build, then `runner/orchestrate.py B E` to scale.
 
 Scopes A (scene) + C (visual) + photoreal + parallel + collision + dexterous IK + smooth motion come for free.
 
 ## 11. Status / roadmap
-- **Done:** ManipulationStage (livery robot + good-mode collision + side rig), 3 Nyx cameras, per-env immersive
-  HDRI background, fully-parallel build, thin pick-place (100/100 grasp · 97/100 place), 2K HDRI restore + wrist
-  near-clip fix, smooth `BatchExecutor`, this blueprint + the full DR spec.
-- **In progress:** dexterity-aware fix for jerk near full extension (route through `plan_pick_place` + dexterity
-  guard + workspace-aware poses); the `dr/` full-DR harness + per-demo `DRPlan`; `runner/orchestrate.py`
-  build-batches; the DR subagent + workbook; the object-refiner agent; the virtual-EE skill +
-  `ObjectSpec.keypoints`; a 2nd task (mug-hang / pour) to prove generalization with no harness edits; LeRobot
-  export + a first pi0.5 fine-tune of Genesis data.
+- **Done:** ManipulationStage (livery robot + good-mode collision + side rig), 3 Nyx cameras + witness, per-env
+  immersive HDRI background, fully-parallel build, smooth `BatchExecutor` + the relax-tilt over-stretch fix, the
+  penetration gate, the build-batch orchestrator (`runner/orchestrate.py` → /data3 + merge), LeRobot v2.1 export.
+  Five objects with REAL native textures (cube/apple/banana/tennis/pen). The **`dr/` full-DR harness** (the spec
+  now FULLY applied) + per-demo `dr_*` trace. The **agent-native modularity refactor DONE**: object_factory +
+  grasp/place ACTIONS + score + distractors extracted into single-responsibility skills; `tasks/pickplace.py`
+  slimmed to a thin composer (978 lines); dead `skills/pick_place.py` deleted. The **object-shove disturbance
+  abandoned + erased**, replaced by the OBJECT-AGNOSTIC **grasp-retry** (`skills/grasp_retry.py`). The
+  DR-strategist + object-refiner subagents (MVP). Reference cube→bowl full-DR collection (`cube_fulldr_v3`,
+  197/200 placed, 0 abnormal pen) → LeRobot (197 ep, pi0.5-ready).
+- **Next:** scale each object to its own ~200-demo full-DR dataset → pi0.5 fine-tune + sim-to-real eval; the
+  virtual-EE skill + `ObjectSpec.keypoints` → a 2nd task (mug-hang / book↔bookshelf / water-pour) to prove
+  generalization with no harness edits; Line C (AERO dexterous hand) on a new branch.
 ```

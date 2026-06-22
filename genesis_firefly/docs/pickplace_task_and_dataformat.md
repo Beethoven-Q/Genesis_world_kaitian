@@ -4,17 +4,19 @@ This is the manual for the cube→bowl pick-place **task** in the Genesis "Line 
 **HDF5 + video data format** it writes, and **how to add a new task** on top of the same reusable world.
 
 The whole robot + cameras + photoreal rendering + per-env immersive HDRI background DR live in the
-**reusable `ManipulationStage`** (`scenes/manipulation_stage.py`). The task file is *thin*: it only adds the
-objects, samples physics DR, plans the skill, scores, and writes data.
+**reusable `ManipulationStage`** (`world/manipulation_stage.py`). The task file is a *thin composer*: it spawns
+the objects (via `world/object_factory.py`), applies the full DR (`dr/`), plans with the reusable skills,
+scores, and writes data.
 
 | | |
 |---|---|
-| **Task collector** | `genesis_firefly/collectors/pickplace_collector.py` |
-| **Reusable world** | `genesis_firefly/scenes/manipulation_stage.py` (`ManipulationStage`) |
-| **Entry script** | `genesis_firefly/scripts/collect_pickplace.py` |
+| **Task (thin composer)** | `genesis_firefly/tasks/pickplace.py` (978 lines) |
+| **Reusable world** | `genesis_firefly/world/manipulation_stage.py` (`ManipulationStage`) |
+| **Entry / one build** | `genesis_firefly/runner/collect.py` (thin wrapper) |
+| **Orchestrator (B builds → /data3)** | `genesis_firefly/runner/orchestrate.py` |
 | **Data root (default)** | `/data3/genesis_fulldr` (`DATA_DIR` env) |
 | **Tile/video root (default)** | `genesis_firefly/output/temp/fulldr_collect` (`OUT_DIR` env) |
-| **Latest result** | N=100, seed 7: **100/100 grasped, 97/100 placed, 3/100 through-wall**, one ~5-min parallel build |
+| **Reference dataset** | `cube_fulldr_v3`: 200 demos, 197 placed, 0 abnormal penetration → LeRobot 197 ep |
 
 > All N trials run in **ONE fully-parallel build** (`stage.build()`), each demo in its own batched env with
 > its own random real room. No subprocess batches.
@@ -86,28 +88,33 @@ old FAST wrote blank "black-stripe" placeholder videos; that is gone — never u
 produces no policy videos). `GRASP_DZ`/`CLOSE_G`/`TGT_FRIC`/`TGT_SINGLE_HULL`/`TGT_DECOMP` override the per-object
 grasp params, `PEN_TRACE=1` prints the worst-ever penetration per phase.
 
-### 1a-ter. Per-object status (2026-06-20)
+### 1a-ter. Per-object status (SOLVED on the natural-motion foundation, 2026-06-20)
 
-The orientation-aware grasp + the configurable-target machinery work for **every** object geometrically; the
-limiter is the **firm GR100 parallel-jaw pinch physics**, which is tuned for the cube's flat, jaw-matched faces.
+The orientation-aware grasp + the configurable-target machinery work for **every** object, and the "needs a dex
+hand" conclusion of the earliest attempt was a **broken-foundation symptom**. Three real root-cause fixes — NO
+new grasp machinery — solved the round/thin/elongated objects (full detail in `roadmap.md` 2026-06-20):
+1. **Round-object ejection = a leaky friction cone, not geometry.** `firm_rigid_options()` never set
+   `noslip_iterations` (defaulted 0); a curved/thin body is a single tangent contact per finger so the leaky cone
+   squirted it out. FIX: set it **PER-OBJECT** (`spec.grasp_noslip`: cube=0, round/curved/thin=5).
+2. **Elongated large-yaw misses = wrong symmetry fold.** `grasp_quat_at` folded every yaw into the cube's 4-fold
+   wedge; an elongated object is 2-fold. FIX: π/2 for the cube, π for elongated → banana 6/12 → 12/12.
+3. **Round go-home wrist-roll snap = yaw-degenerate roll.** FIX: snap the round grasp roll to the home-nearest
+   branch → max|dq| 3.3 → 0.02.
 
-| Object | Geometry | Status | Cause |
-|---|---|---|---|
-| **cube** | 5cm flat box | ✅ **solved** 8/8 (regression) | flat faces stop the claws at ~3mm; jaw-matched. |
-| **banana** | curved, ~3.8cm girth, 3.6cm tall | ⚠️ **partial** ~6/12 grasp, ~5/12 placed, ~2 over-penetrate | the orientation grasp + body-centre offset land the claws on the fruit, but a 2-finger pinch on the **curved** girth **misses ~50%** of first attempts (claws skid / close empty); the misses trigger retries, and the retry re-grasp drives the firm pinch **>7mm** into the rounded body (the first grasp alone is a clean ~6.4mm). Single-hull collider stops the NaN; `grasp_dz=-0.006` + body offset is the best balance found. |
-| **pen** | thin 2.1cm wide, 1.9cm tall, 12cm long, 20g | ❌ **not solved** 0/20 | the descending **open claws sweep the light thin pen ~12cm aside** before they close → every close is empty (`gw≈0.57`, the empty-close stop). A deeper grasp to pin it drives into the table and **NaNs** the Newton solver. |
-| **book** | flat slab 18×13×3cm | ❌ **not solved** 0/20 (geometric) | both horizontal dimensions (18, 13cm) **exceed the ~6cm jaw**, and the only graspable dimension — the 3cm thickness — is **vertical** when the book lies flat, so a top-down/tilted parallel jaw cannot reach it. A side-approach or a suction/edge-pinch skill would be needed. |
-| **apple** | ~7cm sphere | ❌ **not solved** 0/20 | round → the 2-finger pinch **ejects** it (no ref axis cages it); `gw≈0.57` empty close, apple shoved aside. |
-| **tennis_ball** | 6.7cm felt sphere, 57g | ❌ **not solved** 0/20 | round + light → the firm pinch converts the squeeze into a **velocity impulse that LAUNCHES the ball** (observed flung **km** away). The canonical sphere-squirt. |
+| Object | Geometry | Status (clean path, real renders) |
+|---|---|---|
+| **cube** | 5cm flat box | ✅ **8/8** · 2.5mm (0 abnormal) · posture 1.40/1.14 |
+| **apple** | ~7cm sphere (native texture) | ✅ **12/12** · 4.4mm (0) · 1.43/1.07 |
+| **tennis_ball** | 6.7cm felt sphere, 57g | ✅ **12/12** · 6.4mm (0) · 1.43/0.98 |
+| **banana** | curved, ~3.8cm girth | ✅ **12/12** · 6.7mm (0) · 1.41/0.85 |
+| **pen** | thin 2.1×1.9×12cm, 20g | ✅ **12/12** · 6.9mm (0) — the framework's HARDEST penetration corner (rides the 7mm gate; see residuals) |
+| **book** | flat slab 18×13×3cm | ❌ **geometric** — both flat dims exceed the ~6cm jaw and the only graspable (3cm) dim is vertical when flat; needs a side-approach / edge-pinch skill (future) |
 
-**Round-object (apple/tennis_ball/banana) recommendation:** a 2-finger parallel jaw cannot stably cage a smooth
-convex body — the firm pinch either skids off or ejects it. The fix is **not** more grasp_dz/friction tuning (both
-made the penetration/ejection worse). It needs an **under-actuated / caging** grasp (wrap-around fingers, a
-soft/compliant or multi-finger hand that encloses the sphere) or a **pinch-point** strategy that approaches a
-geometric feature (an apple stem, a seam). This is deferred to the **dexterous-hand branch** (roadmap §C). For the
-**thin pen** and the **rounded banana**, a **compliant / contact-stopping close** (close to first contact then hold,
-rather than PD-ramping to a fixed firm `q=0.9`) would stop the sweep-aside and the over-penetration — a change to
-the gripper-control path, out of scope for the per-object task tuning here.
+> **Penetration columns:** `placed/N · max_pen(abnormal) · posture (j4max/j3min)`. All max|dq| ≈ 0.02 (smooth).
+> The **pen** is logged as the hardest penetration corner — it passes the 7mm gate with the least margin; the
+> grasp-retry's big-clean-miss mode is what keeps its noised attempts off the gate (see `grasp_retry.md`).
+> The **book** is the one geometrically-unsolved object for a parallel jaw (deferred to a side-approach skill or
+> the Line C dexterous hand).
 
 **The bowl collision model is the single most important realism choice.** It is loaded as a **convex
 DECOMPOSITION** collider (`convexify=True, decompose_object_error_threshold=0.04, decimate=False` — coacd),
@@ -128,44 +135,40 @@ then **ejected** it off the (ground-plane-less) table to z≈−6 m, whose garba
 trajectory up to 10× (see roadmap). The loop now **clamps** any still-overlapping cube radially outward to
 exactly the 0.125 floor, so a cube can NEVER spawn intersecting the bowl by construction.
 
-### 1b. The skill: orientation-aware grasp + gentle top-down place
+### 1b. The skill: orientation-aware grasp + gentle top-down place (the two extracted ACTION skills)
 
-The plan is 9 EE-space waypoints (`WP`), each `(label, tool_pos, tool_quat_wxyz, gripper_scalar)`:
+The motion is composed from two **reusable, de-closured ACTION skills** (a future grasp-based task imports +
+composes them; both return labelled EE-space waypoints `(label, tool_pos, tool_quat_wxyz, gripper_scalar)`):
 
-```python
-WP = [("pre",   gc - APP*tz,        gq, GR100_OPEN),
-      ("at",    gc,                 gq, GR100_OPEN),
-      ("close", gc,                 gq, GR100_CLOSE),
-      ("lift",  gc + [0,0,LIFT],    cq, GR100_CLOSE),
-      ("carry", bxyz + [0,0,PAPP],  cq, GR100_CLOSE),
-      ("lower", bxyz,               cq, GR100_CLOSE),
-      ("hold",  bxyz,               cq, GR100_CLOSE),   # HOLD stationary so velocity -> 0 before release
-      ("rel",   bxyz,               cq, GR100_OPEN),    # gentle release ABOVE the rim
-      ("ret",   bxyz + [0,0,PAPP],  cq, GR100_OPEN)]
-SEG = [40, 50, 60, 95, 95, 50, 40, 55, 40]   # densification steps per segment
-APP, LIFT, PAPP = 0.12, 0.20, 0.09
-```
+- **Grasp action** `skills/grasp.py::grasp_action_wps(...)` → `home → pre → at → at → close → lift` (the
+  orientation-aware top-down approach + a FIRM GR100 close — the object's own collision stops the claws, the
+  high-kp PD holds the force — + a gentle lift).
+- **Place action** `skills/place.py::place_action_wps(...)` → `lift(settle + re-yaw) → carry → lower → rel → ret
+  → go_home` (re-yaw to the carry orientation, carry over the bowl, lower, release ABOVE the rim, retract, and a
+  smooth densified RETURN HOME — recorded). The carry quat is computed by the caller (via `grasp.cquat`) and
+  passed in, so the place module has NO GraspContext dependency.
 
-- **Grasp orientation** `gq` (per env, `gquat(i)`): the cube's world reference axis is a face normal
-  (`spec.long_axis_local()` = local +X for a cube), folded into the `[-45°, +45°)` band so the jaws align to
-  the **nearest face pair**. Built with `orientation_aware_grasp_quat(world_long_axis(...), tilted_base_quat(reach_dir, 0.0), reference_R=htR[s])`
-  — the gripper closes **across** a face pair, never across the diagonal.
-- **Carry/place orientation** `cq` (per env, `cquat(i, gq)`): `transport_quats(tilted_base_quat(reach_to_bowl, 8.0), reference_quat=gq)[0]`
-  — the **least-wrist-rotation** carry orientation (8° tilt toward the bowl) so the wrist re-yaws smoothly
-  during the lift, not in place at the top.
-- **Gentle top-down place — the second realism rule.** The cube is **released ABOVE the rim and free-drops**
+The two actions are APPENDED into ONE continuous per-env waypoint stream → each env runs pick→place→home as a
+single smooth trajectory and TERMINATES at home (no staged barrier, no mid-air wait). The opt-in
+`skills/grasp_retry.py` re-uses the SAME two builders for the miss→retry path (see `grasp_retry.md`).
+
+- **Grasp orientation** `gq` (per env, `grasp.grasp_quat_at(gctx, i, …)`): the object's world reference axis is a
+  face normal (cube) / long axis (elongated) / None (round), folded into the symmetry wedge (**π/2 for the cube,
+  π for an elongated object** — the fold-bug fix). Built with `orientation_aware_grasp_quat(...)` so the jaws
+  close **across** the short axis, never across the diagonal, with the relax-tilt (`select_grasp_tilt`).
+- **Carry/place orientation** `cq` (per env, `grasp.cquat(gctx, i, gq)`): the **least-wrist-rotation** carry
+  orientation (small tilt toward the bowl + the place relax-tilt) so the wrist re-yaws smoothly during the lift,
+  not in place at the top. A round grasp's free roll is snapped to the home-nearest branch (the go-home snap fix).
+- **Gentle top-down place — the second realism rule.** The target is **released ABOVE the rim and free-drops**
   into the solid bowl; it is *never* lowered while gripped to a target inside the wall. A position-controlled
-  arm (`kp=200`) would otherwise **drive the held cube through the wall** no matter how solid the collider is.
-  The release height is:
-  ```python
-  drop_z = tabZ + 2*BOWL_HALF_H + spec.scaled_extents()[2]/2 + 0.012   # above the rim
-  ```
-  Both `"lower"` and `"rel"`/`"hold"` are at `drop_z` (the gripper stays above the rim). `BOWL_HALF_H = 0.02748`.
-- **The `"hold"` waypoint** keeps the cube stationary over the bowl so its lateral carry velocity → 0 **before**
-  the jaws open — otherwise a residual carry velocity slips a cube corner through a hull seam (this fixed the
-  last ~1/100 real penetration).
+  arm (`kp=200`) would otherwise **drive the held target through the wall** no matter how solid the collider is.
+  The release height is `drop_z = tabZ + 2*BOWL_HALF_H + spec.scaled_extents()[2]/2 + 0.012` (above the rim;
+  `BOWL_HALF_H = 0.02748`). The `lift` settle waypoint keeps the target stationary over the bowl so its lateral
+  carry velocity → 0 **before** the jaws open — otherwise a residual carry velocity slips a corner through a hull
+  seam (this fixed the last ~1/100 real penetration).
 
-The grasp point is `gc = root0 + [0,0,grasp_dz]` from the settled cube root. IK is batched per arm
+The grasp point is `gc = root0 + R(quat)·spec.grasp_center_offset_local + [0,0,grasp_dz]` from the settled target
+root (the offset shifts the grasp onto the BODY of a curved object). IK is batched per arm
 (`robot.entity.inverse_kinematics(..., dofs_idx_local=idx, max_solver_iters=24)`), converting the tool pose →
 ee_link pose with `TOOL_IN_EE_INV` (the measured ~11cm ee-link-behind-claws offset). Waypoints are
 joint-interpolated with a smoothstep ease `ease(u)=3u²−2u³`; the gripper scalar is interpolated and mirrored
@@ -189,10 +192,15 @@ to the mimic claw (`GR100_MIMIC * g`).
 
 ## 2. Full domain randomization
 
-DR has two halves: **physics** (per-env, owned by the **task** in `sample_phys_dr`) and **visual** (owned by
-the **stage**, baked per build-batch / per env). All N envs run in one build.
+> **The complete, authoritative DR spec is [domain_randomization.md](domain_randomization.md), and it is now
+> FULLY APPLIED via the reusable `dr/` package** (`scopes.py` scope-A + scope-C · `object_dr.py` scope-B ·
+> `sampler.py` split → per-build `BuildDR` + batched per-env `EnvDR` · `apply.py` · `plan.py` trace). This section
+> documents the per-env physics axes the cube→bowl task exercises; the once-missing fields (object-table size,
+> side-cam pose, table friction, object size, object friction, light) are all live through `dr/`. The one honest
+> limit: **light is PER-BUILD** (Nyx can't set the directional light per-env; the HDRI supplies per-env
+> image-based lighting). All N envs run in one build.
 
-### 2a. Physics DR — `sample_phys_dr(N, rng, lay, spec)` (per env, independent)
+### 2a. Physics DR — the per-env, independent axes (sampled by `dr/sampler.py::sample_env_phys`)
 
 | Axis | How | Range |
 |---|---|---|
@@ -208,39 +216,43 @@ the **stage**, baked per build-batch / per env). All N envs run in one build.
 (mass/friction DR is wrapped in a `try/except` — it prints `mass/fric DR skipped` and continues if the backend
 build lacks the per-env mass/friction support.)
 
-### 2b. Visual DR — owned by `ManipulationStage` (per env via the Nyx stage)
+### 2b. Visual + scene DR — scope A + scope C (AUTOMATIC, applied via `dr/` + `ManipulationStage`)
 
-The stage does the **environment** visual DR so it never needs re-tuning per task:
+The stage + the `dr/` package do the **scene + environment** DR so it never needs re-tuning per task:
 
-- **Per-env immersive HDRI room** — one random 1K HDRI per env (`stage.hdrs[e]`). Each of the N batched envs
+- **Per-env immersive HDRI room** — one random HDRI per env (`stage.hdrs[e]`). Each of the N batched envs
   renders in its **own random real room** via Nyx per-env env maps (`update_scene → set_env_map`). **No ground
-  plane** — the HDRI *is* the immersive floor + walls + image-based light. The pool is downsampled to **1K**
-  (`/data3/hdr1k`, built lazily by `hdr_pool()`) because **Nyx segfaults past ~50–60 2K env maps**; 1K (¼ the
-  memory) lets all 100 per-env maps fit in one build (100@1K builds in ~22s).
-- **Distinct cube / bowl / table colours** — `stage._pick_table()` randomizes the two table colours
-  (grey-or-HSV); `stage.distinct_object_color(*avoid_h)` returns a saturated colour **guaranteed ≠ the table**
-  (and ≠ any avoided hue). The task picks `cube_col` then `bowl_col` (passing the cube hue to avoid):
-  ```python
-  ch, cube_col = stage.distinct_object_color()
-  _, bowl_col  = stage.distinct_object_color(ch)
-  ```
-- **Lighting** — one soft neutral directional key (`LIGHTS`) plus the HDRI image-based light; the arm uses a
-  **matte** entity-surface override (`gs.surfaces.Default(metallic=0.0, roughness=0.7)`) so the silver SOMA
-  livery reads neutral in any warm room (no env-mirror).
+  plane** — the HDRI *is* the immersive floor + walls + image-based light. **Resolution = 2K when `n_envs ≤ 45`
+  (the build-batch path), else the 1K pool** (`/data3/hdr1k`, built lazily by `hdr_pool()`) because **Nyx
+  segfaults past ~50–60 2K env maps**.
+- **Per-build table texture + colours** — `stage.table_texture` (one albedo from the ≥10-map pack, both tables
+  share it) + `stage._pick_table()` table colours; `stage.distinct_object_color(*avoid_h)` returns a saturated
+  object colour **guaranteed ≠ the table** (and ≠ any avoided hue). The target colour follows its per-object
+  policy (native texture / realistic palette / fixed / free cube) via `world/object_factory.py::target_color`.
+- **Per-build scene DR (scope A/C, `full_dr=True`)** — object-table size grow, side-cam height/pitch, and the
+  **per-build directional key light** colour/intensity (the honest per-env→per-build limit) are drawn in
+  `dr/sampler.py` and realised inside the stage at build (geometry/visual bake at build).
+- **Per-env scene DR** — object-table height (±5cm) + **table friction** (a friction band decoupled from the
+  texture) applied by `dr/apply.py::apply_env_dr`.
+- **Lighting** — the per-build directional key light + the HDRI image-based light; the arm uses a **matte**
+  entity-surface override (`gs.surfaces.Default(metallic=0.0, roughness=0.7)`) so the silver SOMA livery reads
+  neutral in any warm room (no env-mirror).
 
-Cameras/rendering: 4 Nyx path-traced sensors at `RES=(320,180)`, `SPP` (default 32, `SPP` env):
-`third` (low third-person), `cam_side` (world-fixed D435i), `cam_lw` / `cam_rw` (egocentric D405 wrist cams
-attached to `left_link_6` / `right_link_6`). `stage.render()` reads them via the **sensor API** (`cam._stale=True;
-cam.read().rgb`) so the wrist cams re-attach to link_6 each frame (true egocentric).
+Cameras/rendering: 4 Nyx path-traced sensors at `RES=(640,360)`, `SPP` (default 32, `SPP` env):
+`third` (low third-person witness), `cam_side` (world-fixed D435i), `cam_lw` / `cam_rw` (egocentric D405 wrist
+cams attached to `left_link_6` / `right_link_6`). `stage.render()` reads them via the **sensor API**
+(`cam._stale=True; cam.read().rgb`) so the wrist cams re-attach to link_6 each frame (true egocentric).
 
 ### 2c. Distractor / clutter objects (scope-B REQUIRED) — 2–3 irrelevant objects per trial
 
 Every trial spawns **2–3 random irrelevant objects** on the OBJECT table in open areas (so the policy learns to
 pick the **correct** object among lookalikes AND to **not swipe** the others → native collision-avoidance in the
-data). Helpers in `tasks/pickplace.py`:
+data). The corridor-aware **PLACEMENT** (which types + which cells) is the reusable `skills/distractors.py` skill
+(the task passes its keep-out corridors); the **SPAWN** (sim entities) is `world/object_factory.py::spawn_distractors`;
+the task (`tasks/pickplace.py`) wires the two with its `DISTRACTOR_POOL`:
 
 - **Pool** (`DISTRACTOR_POOL`): `{pen, banana, apple, tennis_ball, book}` from the REGISTRY — each renders with a
-  realistic colour/size/mass/friction. USD-sourced objects (apple/banana/pen) render via their **Nyx-safe
+  realistic colour/texture/size/mass/friction. USD-sourced objects (apple/banana/pen) render via their **Nyx-safe
   extracted `*_clean.obj`** mesh (the textured USDs segfault Nyx, same as the bowl).
 - **Per-build = TYPES** (`choose_distractor_types`, drawn with `stage.rng` BEFORE `build()`): K∈{2,3} distinct
   types, **at most one large/long object** (banana/book) so all fit on the table out of the arm path.
@@ -297,9 +309,10 @@ wall_pen = ((rxy > 0.065) & (rxy < 0.11) &          # in the wall annulus (not c
 A cube that rolled out cleanly onto the table is *not* a penetration. Always confirm visually with the **tight
 bowl close-up** in the four-view tiles — the wide third-person view hides wall penetration.
 
-Console line per run:
+Console line per run (e.g. the cube reference, N=20):
 ```
-[COLLECT] 100/100 grasped, 97/100 placed, through-wall=3/100  render+sim <wall>s
+[COLLECT] 20/20 grasped, 20/20 placed, through-wall=0/20  render+sim <wall>s
+[COLLECT] penetration: max=2.5mm, abnormal=0/20
 ```
 
 ---
@@ -324,6 +337,10 @@ Console line per run:
     seed        = int(seed)
     arm         = "left" | "right"         (which arm did this demo)
     hdr         = basename(stage.hdrs[i])  (the HDRI room for this env)
+    max_penetration_mm = float             (the worst-ever solid-solid overlap; the #1 collision gate)
+    penetrating        = bool              (max_penetration_mm > ABNORMAL_THRESH_M=7mm → dropped from success)
+    degenerate         = bool              (settled target was non-finite / off-table → success forced False)
+    dr_*               = the per-demo DR trace (every sampled DR value, written by dr/plan.py — fully traceable)
 ```
 
 The **14-D layout** is `STATE_JOINTS_14 = [L_j1..L_j6, L_grip_driven, R_j1..R_j6, R_grip_driven]`
@@ -358,74 +375,88 @@ the human-facing QA artifacts (the tile is where you eyeball DR coverage + grasp
 ## 5. How to run
 
 ```bash
-# Direct (the collector is runnable as a script):
-CUDA_VISIBLE_DEVICES=0 ./.venv/bin/python genesis_firefly/collectors/pickplace_collector.py <N> [seed]
+# One build (the task is runnable as a script):
+CUDA_VISIBLE_DEVICES=0 [TARGET=cube] ./.venv/bin/python genesis_firefly/tasks/pickplace.py <N> [seed]
 
-# Or via the entry script (identical; thin wrapper):
-CUDA_VISIBLE_DEVICES=0 DATA_DIR=/data3/genesis_fulldr \
-  ./.venv/bin/python genesis_firefly/scripts/collect_pickplace.py <N> [seed]
+# Or via the thin entry wrapper (identical):
+CUDA_VISIBLE_DEVICES=0 ./.venv/bin/python genesis_firefly/runner/collect.py <N> [seed]
 
-# Example: 100 demos, seed 7
-CUDA_VISIBLE_DEVICES=0 ./.venv/bin/python genesis_firefly/collectors/pickplace_collector.py 100 7
+# Scale to a full-DR dataset on /data3: B subprocess builds × E envs (one sim process per GPU), merged
+GPUS=0,1 ./.venv/bin/python genesis_firefly/runner/orchestrate.py <B> <E> [seed0] [dataset]
+
+# Examples
+CUDA_VISIBLE_DEVICES=0 ./.venv/bin/python genesis_firefly/tasks/pickplace.py 20 7         # one 20-env build
+CUDA_VISIBLE_DEVICES=0 FAST=1 NOISE_RETRY=0.45 ./.venv/bin/python genesis_firefly/tasks/pickplace.py 16 7
+GPUS=0,1 ./.venv/bin/python genesis_firefly/runner/orchestrate.py 10 20 7 cube_fulldr_v3 # 200 demos, 10 looks
 ```
 
-Args: `N` (number of demos / parallel envs, default 100), `seed` (default 7). Env vars:
+Args: `N` (number of demos / parallel envs), `seed`. Env vars:
 
 | Env var | Default | Meaning |
 |---|---|---|
-| `DATA_DIR` | `/data3/genesis_fulldr` | the fine-tune dataset (HDF5 + `videos/`); large, keep on `/data3` |
-| `OUT_DIR` | `genesis_firefly/output/temp/fulldr_collect` | the visualization tiles |
+| `TARGET` | `cube` | which registry object to pick-place (any `ObjectSpec`); DATA/OUT default dirs are suffixed by it |
+| `NOISE_RETRY` | off | opt-in object-agnostic miss→retry fraction (see `grasp_retry.md`); off = byte-identical clean path |
+| `DATA_DIR` | `/data3/genesis_fulldr[_<target>]` | the fine-tune dataset (HDF5 + `videos/`); large, keep on `/data3` |
+| `OUT_DIR` | `output/temp/fulldr_collect` | the visualization tiles |
+| `FAST` | off | metrics only — writes ONLY `demos.hdf5` + the `[COLLECT]` prints, **no `.mp4`/`.png`** (never for a real dataset) |
 | `SPP` | `32` | Nyx samples/pixel (denoised; 32 is clean) |
+| `FULL_DR` | `1` | the per-build scope-A/C scene DR (table-size grow, side-cam, light) |
 | `CUDA_VISIBLE_DEVICES` | — | **pin to one GPU**; Genesis batches the N envs internally |
 
 > **One GPU per process.** Genesis vectorizes the N demos into one batched build — do **not** launch parallel
-> processes on a single GPU (multiple Isaac/Genesis instances on one GPU silently break timed grasps).
+> processes on a single GPU (multiple Isaac/Genesis instances on one GPU silently break timed grasps). To scale,
+> use `runner/orchestrate.py` (one subprocess build per GPU).
 
-**Latest result (N=100, seed 7):** **100/100 grasped, 97/100 placed, 3/100 bowl-penetration**, one ~5-min
-parallel build (build + render + sim). The 3 non-placed are cubes that rolled cleanly out of the bowl onto the
-table (realistic), not tunnelling. Earlier runs of the same collector logged 98/100 placed at ~139s on a warm
-HDR cache.
+**Reference dataset (`cube_fulldr_v3`, 10×20):** **200 demos, 197 placed, 0 abnormal penetration**, ~50/50 L/R,
+natural variable-length motion → LeRobot `genesis_cube_fulldr_v3` (197 episodes, pi0.5-ready). The 3 non-placed
+are cubes that rolled cleanly out of the bowl onto the table (realistic), not tunnelling.
 
 ---
 
 ## 6. How to add a new task
 
-The whole point of the split is that a new task is a **copy of this one file** — the stage, robot, cameras,
-rendering, HDRI/colour DR, the 14-D HDF5 schema, the video/tile machinery, and the IK adapter are all reused
-**unchanged**. To add a task:
+A new task is a **THIN composer on top of the same stage + skills + DR** — the robot, cameras, rendering, the
+full-DR harness, the 14-D HDF5 schema, the video/tile machinery, and the IK adapter are all reused **unchanged**.
+To add a task (mirror `tasks/pickplace.py`):
 
-1. **Copy** `collectors/pickplace_collector.py` → `collectors/<yourtask>_collector.py`.
-2. **Swap the objects.** Replace the cube + bowl `stage.scene.add_entity(...)` calls with your task's entities
-   (add them to `stage.scene` **before** `stage.build()`). Reuse `stage.distinct_object_color()` to get
-   colours guaranteed distinct from the (randomized) table. For a registered graspable, pull geometry from
-   `_core_vendored/object_spec.py REGISTRY[...]` (or add an `ObjectSpec` entry — no per-object code needed).
-   For a concave container, follow `build_bowl`'s **convex-decomposition** recipe (`convexify=True,
-   decompose_object_error_threshold=0.04`) and a Nyx-safe visual mesh.
-3. **Swap the plan.** Edit `sample_phys_dr` for your object's pose/yaw/mass DR, and rewrite the `WP`/`SEG`
-   waypoint list for your manipulation. Reuse `skills/grasp.py` (`orientation_aware_grasp_quat`,
-   `tilted_base_quat`, `transport_quats`, `world_long_axis`) and the `ik(...)` helper for EE→joint. For any
-   container task, keep the **release-above + free-drop** rule (never drive a held object to a target inside a
-   wall) and a **hold** waypoint to zero velocity before release.
-4. **Swap the scorer.** Rewrite the `placed` predicate and the penetration metric for your geometry. Keep the
-   per-env, measured-pose pattern (read final pose vs the per-env target; measure penetration from the per-env
-   container centre, never a global assumption). MEASURE penetration and render a tight close-up before
-   claiming "no penetration".
+1. **Spawn the objects** via `world/object_factory.py` — `spawn_target(scene, spec, color, …)` for the grasp
+   target (faithful convex-decomposition / single-hull collider + native texture) and `spawn_distractors(...)` for
+   the clutter, added to `stage.scene` **before** `stage.build()`. Add an `ObjectSpec` to the registry first
+   (the object-refiner agent can produce one). For a concave container, follow the bowl's **convex-decomposition**
+   recipe (`convexify=True, decompose_object_error_threshold=0.04`) + a Nyx-safe visual mesh.
+2. **Apply the DR** — name which scope-B fields apply (scopes A + C are free); `dr/apply.py::apply_build_dr` before
+   build + `apply_env_dr` after. The DR-strategist owns the ranges + the recognizability/colour policy.
+3. **Plan with the skills** — compose `skills/grasp.py::grasp_action_wps` + `skills/place.py::place_action_wps`
+   (optionally `skills/grasp_retry.py`, later a `virtual_ee`), built from `grasp.grasp_quat_at`/`cquat` + the
+   relax-tilt selection; run through `skills/executor.py::BatchExecutor`. For any container task, keep the
+   **release-above + free-drop** rule (never drive a held object to a target inside a wall) + a settle waypoint to
+   zero velocity before release.
+4. **Score** with `skills/score.py::score_placement` (spec-aware) + the `skills/penetration.py` GATE. Keep the
+   per-env, measured-pose pattern (read final pose vs the per-env target; measure penetration from the solver
+   buffer). MEASURE penetration and render a tight close-up before claiming "no penetration".
 5. **Reuse everything else unchanged** — `ManipulationStage` (do not edit it; it owns the world), the §4 HDF5
-   write, the `videos/cam_{side,lw,rw}` policy stream, the `sqrt(N)` third tile + 10 four-view tiles, and the
-   `DATA_DIR`/`OUT_DIR`/`SPP` env-var run interface.
+   write + the `dr_*` trace, the `videos/cam_{side,lw,rw}` policy stream, the `sqrt(N)` third tile + four-view
+   tiles, and the `TARGET`/`DATA_DIR`/`OUT_DIR`/`SPP`/`NOISE_RETRY` run interface. To scale, use
+   `runner/orchestrate.py`.
 
 ### Reusable API quick reference
 
 ```python
-# scenes/manipulation_stage.py
-stage = ManipulationStage(n_envs, seed=0, res=(320,180), spp=32)
+# world/manipulation_stage.py
+stage = ManipulationStage(n_envs, seed=0, res=(640,360), spp=32, noslip=0, full_dr=True)
 stage.scene                 # the gs.Scene -> add your objects to it BEFORE build
 stage.distinct_object_color(*avoid_h) -> (hue, rgb)   # colour != table (and != avoided hues)
 stage.build()                                          # build(n_envs, env_spacing=(0,0)) + robot.finalize()
 stage.settle_home(steps=70) -> home_cmd (N, n_dofs)
 stage.render() -> {"third"|"cam_side"|"cam_lw"|"cam_rw": (N,H,W,3) uint8}
-stage.robot / stage.cams / stage.lay / stage.rng / stage.hdrs / stage.otable / stage.H / stage.W
+stage.set_otable_top_z(top_z) / stage.set_table_friction(ratio)   # used by dr/apply.py::apply_env_dr
+stage.robot / stage.cams / stage.lay / stage.rng / stage.hdrs / stage.otable / stage.table_texture / stage.H / stage.W
 np_(x)                       # CUDA tensor -> numpy at the sim<->skills boundary (quat = wxyz)
+
+# world/object_factory.py
+spawn_target(scene, spec, color, ...)      # the grasp target: faithful collider + native texture
+spawn_distractors(scene, ...)              # the clutter (the task passes its placement samplers / keep-outs)
+build_object(...) / target_color(spec, rng)
 
 # robots/firefly_dual.py  (FireflyDual, accessed via stage.robot)
 robot.arm["left"|"right"]            # 6 arm dof indices (Genesis INTERLEAVES dual-arm dofs)
@@ -437,20 +468,23 @@ GR100_OPEN=0.0  GR100_CLOSE=0.9  GR100_MIMIC=-1.0    # gripper scalars (mimic = 
 
 # robots/ik.py
 TOOL_IN_EE_INV, tool_R_at_home(home_ee_R)            # tool(claw)-frame <-> ee_link; ~11cm offset
-# (GenesisArmIK.solve(tool_pos, tool_quat, q_init) -> IKSolution is the per-arm OO wrapper)
 
-# skills/grasp.py  (sim-agnostic; all wxyz)
-world_long_axis(local_axis, root_quat_wxyz)
-orientation_aware_grasp_quat(ref_axis_world, base_quat, *, reference_R=None)
-tilted_base_quat(reach_dir_xy, tilt_deg)             # tilt_deg=0 -> pure top-down
-transport_quats(base_quat, reference_quat=None)      # least-wrist-rotation carry orientations
-grasp_waypoints(...) / place_waypoints(...)          # canned pick/place waypoint lists (if you don't hand-roll WP)
+# skills/  (sim-agnostic; all wxyz)
+grasp.world_long_axis / grasp.orientation_aware_grasp_quat / grasp.tilted_base_quat / grasp.transport_quats
+grasp.GraspContext / grasp.grasp_quat_at / grasp.cquat / grasp.select_grasp_tilt / grasp.select_place_tilt
+grasp.grasp_action_wps(ctx, i, gc, gq, open_g, close_g, app, lift, home_tool, home_tquat)   # the GRASP action
+place.place_action_wps(i, lift_pose, carry_quat, bowl_xyz, papp, open_g, close_g, home_tool, home_tquat)  # PLACE
+grasp_retry.run_grasp_retry(...)     # opt-in miss->retry (default off)
+score.score_placement(...) -> (placed, metrics)  ;  score.through_wall(...)
+penetration.PenetrationTracker / penetration.max_penetration / penetration.ABNORMAL_THRESH_M (=0.007)
+executor.BatchExecutor(...).run(...)
 
-# scenes/firefly_scene.py
-TableLayout()  BOWL_HALF_H=0.02748  firm_rigid_options()  build_bowl(scene, xy, top_z, surface=...)
+# world/firefly_scene.py
+TableLayout()  BOWL_HALF_H=0.02748  firm_rigid_options(noslip_iterations=...)  build_bowl(scene, xy, top_z, surface=...)
 
-# _core_vendored/object_spec.py
-REGISTRY["cube"|"apple"|"banana"|"pen"|"tennis_ball"]   # ObjectSpec: extents, mass, long_axis, grasp_dz, ...
+# registry/object_spec.py
+REGISTRY["cube"|"apple"|"banana"|"pen"|"tennis_ball"|"book"]   # ObjectSpec: extents, mass, long_axis, grasp_dz,
+                                                              # grasp_noslip, target_palette, native_texture, keypoints, ...
 ```
 
 ### Gotchas to carry into a new task

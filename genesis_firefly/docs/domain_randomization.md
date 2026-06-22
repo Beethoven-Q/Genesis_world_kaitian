@@ -135,10 +135,14 @@ table in OPEN areas, with **realistic physics + collision** (they rest, can be b
   swipe the others (collision avoidance). Clean single-object scenes teach neither.
 - **Applies to ALL tasks** (not just pick-place), scaled to the task's geometry.
 
-> **How it's implemented** (`tasks/pickplace.py`: `DISTRACTOR_POOL`, `choose_distractor_types`,
-> `sample_distractor_poses`, `spawn_distractors`, `_spawn_distractor_entity`).
+> **How it's implemented.** The corridor-aware PLACEMENT (which types, which cells) is the reusable
+> `skills/distractors.py` skill — the task passes its OWN keep-out corridors (cube / bowl / carry tube / return
+> tube / near-seam strip / active-arm home) and `skills/distractors.py` rejection-grids the clutter clear of them.
+> The actual spawn (the sim entities) is `world/object_factory.py::spawn_distractors` / `_spawn_distractor_entity`.
+> The task (`tasks/pickplace.py`) wires the two: `DISTRACTOR_POOL`, its keep-out corridors, and the placement →
+> spawn handoff.
 > - **Pool:** `{pen, banana, apple, tennis_ball, book}` from the REGISTRY (`registry/object_spec.py`). Each
->   renders realistically (apple red, banana yellow, pen dark, tennis ball yellow-green, book dark-red).
+>   renders realistically (apple native texture, banana yellow, pen dark, tennis ball yellow-green, book dark-red).
 > - **Per-build = which TYPES** (entities are created before `scene.build()`): `choose_distractor_types` draws
 >   K∈{2,3} distinct types with `stage.rng` (WITHOUT replacement → varied lookalikes); **at most ONE large/long
 >   object (banana/book)** per build so all fit on the table out of the arm path.
