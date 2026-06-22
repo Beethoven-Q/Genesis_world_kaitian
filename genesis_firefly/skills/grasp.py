@@ -238,7 +238,10 @@ class GraspContext:
     ELBOW_MIN: float    # keep j3 (elbow) >= this
 
 
-def grasp_quat_at(ctx: GraspContext, i, cx, cy, tilt_deg=0.0):
+_NO_REF = object()   # sentinel: "derive the ref axis from ctx.yaw[i]" (None is a VALID ref axis = round object)
+
+
+def grasp_quat_at(ctx: GraspContext, i, cx, cy, tilt_deg=0.0, *, ref_axis_world=_NO_REF):
     """The orientation-aware grasp quat for env i with the cube at (cx,cy) -- reuses the LOCKED grasp
     builders (yaw-folded for the cube, tilt base toward the cube). Used both for the first grasp and to
     RE-PLAN the recovery grasp at the cube's NEW (shoved) location.
@@ -247,20 +250,34 @@ def grasp_quat_at(ctx: GraspContext, i, cx, cy, tilt_deg=0.0):
     reach direction (cube - arm base), EXACTLY as RoboLab's ``reachable_grasp_quat`` relax-tilt does. A
     small forward tilt keeps the WRIST off its limit + the ELBOW bent through the lift in this LOW (table-
     at-base-level) workspace where a pure top-down lift is near-singular. The per-env tilt is chosen by
-    ``select_grasp_tilt`` below (prefer top-down; relax to the smallest tilt that stays wrist-comfortable)."""
+    ``select_grasp_tilt`` below (prefer top-down; relax to the smallest tilt that stays wrist-comfortable).
+
+    ``ref_axis_world`` (default sentinel _NO_REF): the OBJECT's grasp reference axis ALREADY expressed in the
+    WORLD frame, used INSTEAD of the one derived from ``ctx.yaw[i]``. The grasp-retry's phase-2 re-grasp passes
+    the axis built from the object's RE-READ quaternion here, so a noisy graze that ROTATED the object is
+    RESPECTED (the gripper yaw tracks the re-read orientation, not the stale stored yaw). Pass ``None`` for a
+    round object (no preferred axis -> free roll, snapped to home below). The DEFAULT sentinel keeps the
+    clean/first-attempt path byte-identical (it derives the axis from the stored yaw exactly as before)."""
     s = "left" if ctx.side_is_left[i] else "right"
-    # Fold the in-plane yaw into the object's SYMMETRY wedge before building the reference axis. The CUBE is
-    # 4-fold symmetric (a face repeats every 90deg) -> fold to [-45,45]. An ELONGATED object (banana/pen) is
-    # only 2-fold symmetric about its LONG axis (the line repeats every 180deg) -> fold to [-90,90]; folding
-    # it into the cube's 45deg wedge computed the grasp for the WRONG axis and the claws MISSED the banana at
-    # |yaw|>45 (verified: collector banana failures were exactly the large-|yaw| envs). A ROUND object has no
-    # axis (laxis is None) so the fold is irrelevant. fold = pi/2 (cube) or pi (elongated).
-    fold = (np.pi / 2) if ctx.spec.is_cube else np.pi
-    yr = ((ctx.yaw[i] + fold / 2) % fold) - fold / 2
-    qzr = np.array([np.cos(yr / 2), 0.0, 0.0, np.sin(yr / 2)])
     base_q = tilted_base_quat(np.array([cx, cy]) - ctx.base[s], float(tilt_deg))
-    gq = orientation_aware_grasp_quat(world_long_axis(ctx.laxis, qzr), base_q, reference_R=ctx.htR[s])
-    if ctx.laxis is None:
+    if ref_axis_world is not _NO_REF:
+        # RE-READ ORIENTATION (grasp-retry phase 2): the caller supplies the world reference axis straight from
+        # the object's live quaternion, so the grasp closes ACROSS the object's ACTUAL (possibly rotated) axis.
+        gq = orientation_aware_grasp_quat(ref_axis_world, base_q, reference_R=ctx.htR[s])
+        laxis = ref_axis_world
+    else:
+        # Fold the in-plane yaw into the object's SYMMETRY wedge before building the reference axis. The CUBE is
+        # 4-fold symmetric (a face repeats every 90deg) -> fold to [-45,45]. An ELONGATED object (banana/pen) is
+        # only 2-fold symmetric about its LONG axis (the line repeats every 180deg) -> fold to [-90,90]; folding
+        # it into the cube's 45deg wedge computed the grasp for the WRONG axis and the claws MISSED the banana at
+        # |yaw|>45 (verified: collector banana failures were exactly the large-|yaw| envs). A ROUND object has no
+        # axis (laxis is None) so the fold is irrelevant. fold = pi/2 (cube) or pi (elongated).
+        fold = (np.pi / 2) if ctx.spec.is_cube else np.pi
+        yr = ((ctx.yaw[i] + fold / 2) % fold) - fold / 2
+        qzr = np.array([np.cos(yr / 2), 0.0, 0.0, np.sin(yr / 2)])
+        laxis = ctx.laxis
+        gq = orientation_aware_grasp_quat(world_long_axis(laxis, qzr), base_q, reference_R=ctx.htR[s])
+    if laxis is None:
         # ROUND object (no preferred grasp axis): the wrist ROLL is FREE, so orientation_aware_grasp_quat
         # returned base_q WITHOUT aligning the roll. Left free, the roll varies with the reach direction and
         # can land ~pi from the HOME wrist roll -> the carry inherits it and the go_home then FLIPS joint_6
@@ -362,16 +379,18 @@ def select_place_tilt(ctx: GraspContext, solve, gqA):
     return tilt
 
 
-def _posture_at_pick_env(ctx: GraspContext, solve, env_i, gci, tilt_deg, apex_z=None):
+def _posture_at_pick_env(ctx: GraspContext, solve, env_i, gci, tilt_deg, apex_z=None, *, ref_axis_world=_NO_REF):
     """Single-env (gq, |j4|, j3) over the PICK binding frames at grasp centre ``gci`` and the given tilt -- the
     env_i row of ``_posture_at_pick``, so the SCORING is byte-identical. ``apex_z`` (the recovery rise apex
     height): the recovery/chase re-grasp does rise->REORIENT-at-apex->descend->close->lift, so the high apex
     REORIENT (top-down at high EEz) is ALSO a binding frame that can saturate the wrist (the same high-EE
     saturation the lift fix addressed). When given, the apex pose at ``gqi`` is folded into the worst-case so
     the relax ladder picks a tilt comfortable AT THE APEX too -- otherwise the probe (pre+lift only) approves
-    a tilt that the recovery's apex reorient still saturates (the 2026-06-20 recovered-demo j4=1.57 bug)."""
+    a tilt that the recovery's apex reorient still saturates (the 2026-06-20 recovered-demo j4=1.57 bug).
+    ``ref_axis_world`` (grasp-retry phase 2) re-plans the grasp orientation from the object's RE-READ axis so
+    the tilt is scored for the SAME wrist posture the recovery actually commands (re-read orientation respected)."""
     N, APP, LIFT = ctx.N, ctx.APP, ctx.LIFT
-    gq = grasp_quat_at(ctx, env_i, gci[0], gci[1], float(tilt_deg)).astype(np.float64)
+    gq = grasp_quat_at(ctx, env_i, gci[0], gci[1], float(tilt_deg), ref_axis_world=ref_axis_world).astype(np.float64)
     tz = _R_from_wxyz(gq) @ np.array([0, 0, 1.0])
     gcN = np.tile(np.asarray(gci, float), (N, 1))          # broadcast to the batched solve (we read row env_i)
     gqN = np.tile(gq, (N, 1))
@@ -393,21 +412,28 @@ def _posture_at_pick_env(ctx: GraspContext, solve, env_i, gci, tilt_deg, apex_z=
     return gq, j4, j3
 
 
-def select_grasp_tilt_at(ctx: GraspContext, solve, env_i, gci, apex_z=None):
+def select_grasp_tilt_at(ctx: GraspContext, solve, env_i, gci, apex_z=None, *, ref_axis_world=_NO_REF):
     """Smallest of _GRASP_TILT_STEPS_DEG keeping |j4|<=limit-margin AND j3>=ELBOW_MIN through the pick at the
     SHOVED grasp centre ``gci`` -- the per-env relax ladder of ``select_grasp_tilt`` (identical thresholds).
-    ``apex_z`` folds the recovery/chase rise-apex reorient into the worst-case (see _posture_at_pick_env)."""
+    ``apex_z`` folds the recovery/chase rise-apex reorient into the worst-case (see _posture_at_pick_env).
+    ``ref_axis_world`` re-plans the grasp from the object's RE-READ axis so the tilt matches the recovery pose."""
     WRIST_LIMIT, WRIST_MARGIN, ELBOW_MIN = ctx.WRIST_LIMIT, ctx.WRIST_MARGIN, ctx.ELBOW_MIN
     for t in ctx.tilt_steps:
-        _, j4, j3 = _posture_at_pick_env(ctx, solve, env_i, gci, t, apex_z=apex_z)
+        _, j4, j3 = _posture_at_pick_env(ctx, solve, env_i, gci, t, apex_z=apex_z, ref_axis_world=ref_axis_world)
         if (j4 <= (WRIST_LIMIT - WRIST_MARGIN)) and (j3 >= ELBOW_MIN):
             return float(t)
     return float(ctx.tilt_steps[-1])                        # none fully clears -> the largest (most-relaxed) tilt
 
 
-def select_place_tilt_at(ctx: GraspContext, solve, env_i, gqi):
+def select_place_tilt_at(ctx: GraspContext, solve, env_i, gqi, lift_pose=None):
     """Smallest carry tilt keeping the carry-over-bowl wrist/elbow comfortable at the re-grasp orientation
-    ``gqi`` (the carry quat re-yaws to gqi's branch) -- the per-env ladder of ``select_place_tilt``."""
+    ``gqi`` (the carry quat re-yaws to gqi's branch) -- the per-env ladder of ``select_place_tilt``.
+
+    ``lift_pose`` (the recovery lift the carry STARTS from): the wrist RE-YAWS from the grasp branch ``gqi`` to
+    the carry branch ``cqi`` as the arm SWINGS lift->over-bowl, and that swing is NON-monotonic -- it can PEAK
+    through the wrist limit BETWEEN the (checked) lift/over-bowl endpoints (the recovered-demo carry j4=1.57 spike
+    mid-swing). When given, the lift pose at ``cqi`` AND the lift->over-bowl midpoint are folded into the worst-
+    case so the relax ladder picks a carry tilt comfortable ACROSS the whole swing, not just at its ends."""
     N, bxyz, PAPP = ctx.N, ctx.bxyz, ctx.PAPP
     WRIST_LIMIT, WRIST_MARGIN, ELBOW_MIN = ctx.WRIST_LIMIT, ctx.WRIST_MARGIN, ctx.ELBOW_MIN
     over_bowl = bxyz.copy(); over_bowl[:, 2] += PAPP
@@ -415,6 +441,16 @@ def select_place_tilt_at(ctx: GraspContext, solve, env_i, gqi):
         cqi = cquat(ctx, env_i, gqi, float(t))
         cqN = np.tile(cqi, (N, 1)).astype(np.float64)
         solve(bxyz.copy(), cqN); q = solve(over_bowl, cqN)
-        if (abs(float(q[env_i, 3])) <= (WRIST_LIMIT - WRIST_MARGIN)) and (float(q[env_i, 2]) >= ELBOW_MIN):
+        j4 = abs(float(q[env_i, 3])); j3 = float(q[env_i, 2])
+        if lift_pose is not None:
+            # warm chain lift -> mid -> over-bowl at the carry quat (the real recovery carry swing). The wrist
+            # re-yaw from the grasp branch peaks mid-swing, so probe the lift + the lift->over-bowl midpoint too.
+            lp = np.tile(np.asarray(lift_pose, float), (N, 1))
+            mid = 0.5 * (lp + over_bowl)
+            for wp_ in (lp, mid, over_bowl):
+                qd = solve(wp_, cqN)
+                j4 = max(j4, abs(float(qd[env_i, 3])))
+                j3 = min(j3, float(qd[env_i, 2]))
+        if (j4 <= (WRIST_LIMIT - WRIST_MARGIN)) and (j3 >= ELBOW_MIN):
             return float(t)
     return 40.0

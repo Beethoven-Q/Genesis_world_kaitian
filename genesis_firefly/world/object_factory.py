@@ -55,9 +55,13 @@ def build_object(scene, spec, pos_xy, table_top_z, mass=None):
 
 def _spawn_distractor_entity(scene, spec, pos_xy, z):
     """Spawn ONE distractor as a real collidable rigid body, but with a NYX-SAFE visual. cuboid/sphere are
-    procedural (Nyx-safe already); USD-sourced objects (apple/banana/pen) render via their extracted clean
-    .obj mesh + a realistic flat colour (Nyx SEGFAULTS on the textured USD material binding, the same reason
-    the bowl uses bowl_clean.obj). Collision fidelity (convex decomposition) is identical to the grasp path."""
+    procedural (Nyx-safe already); USD-sourced objects (apple/banana/pen/book/tennis) render via their extracted
+    clean .obj mesh (Nyx SEGFAULTS on the textured USD material binding, the same reason the bowl uses
+    bowl_clean.obj). NATIVE TEXTURE (DR-strategist RECOGNIZABILITY RULE): a distractor with a declared
+    ``native_texture`` renders its OWN UV-mapped photoreal skin via ``_target_usd_surface`` -- the SAME Nyx-safe
+    ImageTexture idiom the GRASP TARGET uses -- so a distractor apple/banana/pen/book/tennis reads as a REAL
+    object, never a flat pink blob / colour stick. Distractors with NO native_texture (none currently) fall back
+    to the realistic flat ``dist_color``. Collision fidelity (single convex hull) is unchanged from before."""
     x, y = pos_xy
     # distractors only need to REST (not be grasped), so use firm friction so they sit put under a graze.
     mat = gs.materials.Rigid(rho=_rho_for(spec), friction=max(1.1, float(spec.friction[0])))
@@ -67,14 +71,16 @@ def _spawn_distractor_entity(scene, spec, pos_xy, z):
     if spec.source == "sphere":
         return scene.add_entity(gs.morphs.Sphere(radius=float(spec.scaled_extents()[0] / 2), pos=(x, y, z)),
                                 material=mat, surface=gs.surfaces.Rough(color=spec.color))
-    # USD object -> Nyx-safe clean mesh + flat realistic colour. Collision = a SINGLE convex hull (no
-    # decomposition): a distractor is never grasped, so it doesn't need a faithful concave collider, and a hull
-    # gives a FLATTER, stable resting base -> a curved banana doesn't slowly roll/creep off a rounded decomposed
-    # facet (that intrinsic creep, not the arm, was reading as a 2-3cm "knock" in the displacement metric).
+    # USD object -> Nyx-safe clean mesh + native texture (or flat realistic fallback). Collision = a SINGLE
+    # convex hull (no decomposition): a distractor is never grasped, so it doesn't need a faithful concave
+    # collider, and a hull gives a FLATTER, stable resting base -> a curved banana doesn't slowly roll/creep off
+    # a rounded decomposed facet (that intrinsic creep, not the arm, was reading as a 2-3cm "knock" in the
+    # displacement metric). The VISUAL now reuses _target_usd_surface (native ImageTexture, Nyx-safe) so the
+    # distractor shows its OWN photoreal skin instead of a flat colour (Fix 2). dist_color is the flat fallback.
     col = spec.dist_color or spec.color
     return scene.add_entity(
         gs.morphs.Mesh(file=str(OBJECTS / spec.mesh_subpath), pos=(x, y, z), scale=spec.scale, convexify=True),
-        material=mat, surface=gs.surfaces.Plastic(color=col, roughness=0.5))
+        material=mat, surface=_target_usd_surface(spec, col))
 
 
 def target_color(spec, free_color, rng):

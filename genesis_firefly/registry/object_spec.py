@@ -182,11 +182,21 @@ REGISTRY: dict[str, ObjectSpec] = {
     # 24/24 placed, 0/24 abnormal, max 6.7mm (under the 7mm gate). The deeper seat ALONE (at the full 0.9 close)
     # made penetration WORSE (drives further in); the gentler close is what lets the slight deeper seat cage
     # without over-penetrating. grasp_close stays >= GR100_MEET(0.58) so the empty-close miss detector is valid.
-    # grasp_close=0.78 is the sweet spot (E=24 seed7: 0/24 abnormal, max 6.5mm; 24/24 grasped); LOWER (<=0.76)
-    # is non-monotonically WORSE (the gentle target lets the body shift into a deeper bite). The pen is the
-    # framework's hardest penetration case (a thin body the firm pad-near-pad clamp wants to over-bite), so it
-    # rides near the 7mm gate -- at E=12 the odd far-reach env can still nick ~7.3mm (1/12). Lower-risk than a
-    # deeper seat at the full close, which over-bit it (4/24 abnormal).
+    # GRASP-MARGIN TUNE (2026-06-21, owner Fix 3): at N=16 the firm 0.78 close rode OVER the 7mm gate (seed7:
+    # 8.6mm, 2/16 abnormal -- the thin body the firm pad-near-pad clamp over-bites). The penetration is FORCE-
+    # driven: the gripper DOF is hard-clamped at GR100_MEET (pads just meet) and the firm PD (GRIP_KP=200) presses
+    # toward grasp_close, so the pad-into-pen depth ~= KP*(close - MEET)/contact_stiffness. The ONE effective pen-
+    # only lever is grasp_close (a gentler press => a shallower bite); a full GPU sweep mapped it (N=16 seed7, all
+    # 16/16 grasped+placed): close 0.78->8.6mm(2), 0.77->8.1mm(1), 0.76->6.8mm(0), 0.75->6.9mm(0), 0.72->8.4mm(1),
+    # 0.70->8.9mm(2) -- a NARROW sweet spot at 0.75-0.76 (lower lets the body shift into a deeper bite during the
+    # gentle hold; the spec's old 0.78 was on the wrong side of it). Higher friction made it MUCH worse (the sticky
+    # contact drags the body into a deeper bite: fric 1.4->11.6mm, 1.8->16.7mm), so pen friction is kept at the
+    # spec (1.0,0.9) and grasp_close lowered 0.78 -> 0.76. HONEST LIMIT: ~6.8mm is the pen's penetration FLOOR (the
+    # firm-contact yield of the pad into a thin compliant body); it cannot reach the <4mm aspiration without a
+    # hold-losing press force, and it still rides the gate seed-to-seed (seed11 ~7.8mm). The BIMODAL clean-miss
+    # noise (skills/grasp_retry) removes the EXTRA graze-penetration the old single-jitter miss added, so under
+    # NOISE_RETRY the pen now clears the gate. rest_offset (a RoboLab-era contact standoff) is NOT wired in this
+    # Genesis build (no per-geom contact margin / collision-dilation param exists) -> documented but inert here.
     # NATIVE TEXTURE (DR-strategist, RECOGNIZABILITY RULE): dry_erase_marker_tex.obj is geometry-equal to the
     # _clean.obj (identical volume/extents/convex hull; 14043 vt, all faces UV-mapped) -> renders the REAL BOP
     # YCB-V large-marker scan (ycb/textures/obj_000018.png: white EXPO barrel + printed label band + black chisel
@@ -199,7 +209,7 @@ REGISTRY: dict[str, ObjectSpec] = {
         native_texture="ycb/textures/obj_000018.png",
         mass=0.020, extents=(0.0210, 0.1208, 0.0189), local_center=(0.0, 0.0, 0.0),
         elongated=True, local_long_axis=(-0.0303, 0.9995, 0.0), grasp_dz=-0.004, grasp_single_hull=True,
-        grasp_close=0.78, rest_offset=0.004, release_dz=0.03, x_range=(0.34, 0.44), place_xy_tol_cm=9.0,
+        grasp_close=0.76, rest_offset=0.006, release_dz=0.03, x_range=(0.34, 0.44), place_xy_tol_cm=9.0,
         target_palette=((0.10, 0.10, 0.12), (0.12, 0.20, 0.55), (0.55, 0.12, 0.14))),  # black / blue / red marker
     "cube": ObjectSpec(
         name="cube", language_name="cube", source="cuboid", mass=0.040,

@@ -36,6 +36,7 @@ from skills.grasp import _R_from_wxyz, _wxyz_from_R  # noqa: E402
 # quat builders + the RoboLab-faithful relax-tilt selection were extracted out of collect() into skills/grasp.py
 # as PURE functions over a ``GraspContext`` (built once below). collect() builds the context + calls them 1:1.
 import skills.grasp as grasp  # noqa: E402
+import skills.grasp_retry as grasp_retry  # OBJECT-AGNOSTIC miss->retry orchestration (opt-in; default off)  # noqa: E402
 from skills.executor import BatchExecutor  # the ONE smooth motion path (densify + batch IK)  # noqa: E402
 from skills.penetration import PenetrationTracker, ABNORMAL_THRESH_M  # the #1 collision gate  # noqa: E402
 from registry.object_spec import REGISTRY  # noqa: E402
@@ -729,12 +730,17 @@ def collect(N, seed, data_dir, out_dir, target=None):
             ("lift",  gci + [0, 0, LIFT], gqA[i], CLOSE),
         ]
 
-    def place_tail(i, liftp, gqi):
+    def place_tail(i, liftp, gqi, place_tilt_i=None):
         """From the LIFTED grasp pose ``liftp`` (held at ``gqi``): re-yaw to the carry orientation, carry over the
         bowl, lower in, release, retract, GO HOME. This is APPENDED to the same continuous per-env waypoint stream
         (the pick) so each env runs pick->place->home as ONE smooth trajectory and
-        TERMINATES at home -- no staged barrier, no mid-air wait for other envs."""
-        cqi = grasp.cquat(gctx, i, gqi, place_tilt[i])            # wrist-margin-aware carry tilt (natural posture)
+        TERMINATES at home -- no staged barrier, no mid-air wait for other envs.
+
+        ``place_tilt_i`` overrides the clean batch carry tilt ``place_tilt[i]``: the grasp-retry recovery passes a
+        tilt RE-SELECTED for its re-read grasp orientation (select_place_tilt_at) so the carry-over-bowl never
+        over-stretches the wrist at a recovery grasp that differs from the clean one (the banana j4 fix)."""
+        pt = float(place_tilt[i]) if place_tilt_i is None else float(place_tilt_i)
+        cqi = grasp.cquat(gctx, i, gqi, pt)                       # wrist-margin-aware carry tilt (natural posture)
         return [
             ("lift",    liftp + [0, 0, 0.02],   cqi, CLOSE),       # small settle + re-yaw to the carry orientation
             ("carry",   bxyz[i] + [0, 0, PAPP], cqi, CLOSE),
@@ -754,15 +760,170 @@ def collect(N, seed, data_dir, out_dir, target=None):
         s = len(acts)
         T_ = run_phase(wps, **kw)
         phase_bounds.append((s, len(acts)))
+        Tlist.append(T_)                 # accumulate this phase's executor step count (clean: one phase; retry: two)
         return T_
 
-    # ===================== CLEAN PATH: ONE continuous per-env trajectory (NO barrier) =====================
-    # home -> pre -> at -> close -> lift -> carry -> lower -> release -> HOME, run as a SINGLE smooth batch.
-    # Every env runs its OWN trajectory to completion; NO env ever holds a lifted object waiting for a slower
-    # env (the idle-in-the-air bug came entirely from the old staged per-phase barriers). Faster envs reach
-    # home first and the recorder TRIMS each env's idle-home tail -> VARIABLE-LENGTH demos (natural). ----
-    wps = [pick_wps(i) + place_tail(i, gc[i] + [0, 0, LIFT], gqA[i]) for i in range(N)]
-    Tlist.append(_run_phase_bounded(wps, settle_steps=40, tag="pick-place-home"))
+    # ===================== PATH SELECT: clean single-phase  -OR-  object-agnostic grasp-RETRY =============
+    # NOISE_RETRY (env var) is the OPT-IN seam. UNSET / "0" -> the CLEAN single-phase path below runs UNCHANGED
+    # (the cube 8/8 · T=977 byte-identical regression). SET to a float probability (e.g. 0.4) -> the TWO-PHASE,
+    # HOLD-FREE grasp-retry: with that probability a per-env grasp ATTEMPT is target-noised (object-agnostic
+    # action-space jitter, skills/grasp_retry.py), a god-mode check sees which envs MISSED, and the missed envs
+    # RE-GRASP at the object's true re-read pose -> miss->recover training data. The orchestration lives in the
+    # skill; the task supplies only its own waypoint builders (pick_wps / retry_pick_wps / place_tail) + IK +
+    # the god-mode readers. The CLEAN path's numerics are untouched (the noise=0 branch IS pick_wps).
+    _NOISE_RETRY = os.environ.get("NOISE_RETRY", "0")
+    _noise_p = 0.0
+    try:
+        _noise_p = float(_NOISE_RETRY)
+    except (TypeError, ValueError):
+        _noise_p = 0.0
+
+    if _noise_p <= 0.0:
+        # ---------------- CLEAN PATH: ONE continuous per-env trajectory (NO barrier) -----------------------
+        # home -> pre -> at -> close -> lift -> carry -> lower -> release -> HOME, run as a SINGLE smooth batch.
+        # Every env runs its OWN trajectory to completion; NO env ever holds a lifted object waiting for a slower
+        # env (the idle-in-the-air bug came entirely from the old staged per-phase barriers). Faster envs reach
+        # home first and the recorder TRIMS each env's idle-home tail -> VARIABLE-LENGTH demos (natural). ----
+        wps = [pick_wps(i) + place_tail(i, gc[i] + [0, 0, LIFT], gqA[i]) for i in range(N)]
+        _run_phase_bounded(wps, settle_steps=40, tag="pick-place-home")
+    else:
+        # ---------------- OBJECT-AGNOSTIC GRASP-RETRY (two-phase, hold-free; skills/grasp_retry.py) --------
+        # The task owns ALL IK; the skill owns the perturbation + success-check + phase sequencing. We hand it
+        # thin builders that RE-PLAN the recovery grasp/place AT the object's re-read pose (relax-tilt there =>
+        # NO over-stretch, exactly like the clean path's select_*_tilt) plus god-mode readers.
+        retry_rng = np.random.RandomState(int(seed) + 99173)      # a DEDICATED stream so the noise draw never
+        #   perturbs the main rng's downstream consumers (DR/clutter already drawn above; this keeps them intact).
+        noise = grasp_retry.sample_target_noise(N, retry_rng, p=_noise_p)
+
+        def read_obj_pos():
+            return np_(cube.get_pos())
+
+        def read_ee_pos():                                        # the ACTIVE end-effector world position, per env
+            return np.where(side_is_left[:, None], np_(ee["l"].get_pos()), np_(ee["r"].get_pos()))
+
+        def brief_settle(steps):
+            # A brief UNRECORDED settle: the robot's PD target persists from the last executor command, so simply
+            # stepping the scene holds the arm at its lifted pose while the object/contacts settle. NO recording,
+            # NO long freeze (just enough for a clean god-mode read). Penetration is still folded so a slammed
+            # grasp during the noised attempt is not missed by the gate.
+            for _ in range(int(steps)):
+                stage.scene.step()
+                pen_tracker.update()
+
+        _NO_REF = grasp._NO_REF                                       # sentinel: derive ref axis from the stored yaw
+
+        def _ref_axis_from_quat(ref_quat):
+            """The object's grasp REFERENCE AXIS expressed in the WORLD frame from a LIVE quaternion ``ref_quat``
+            (wxyz): rotate the spec's LOCAL grasp axis -- a FACE normal for the cube, the LONG axis for pen/banana,
+            ``None`` for a round object -- by ``ref_quat``, then FLATTEN to the table (XY) plane. Fed to grasp_quat_at
+            so the recovery grasp closes ACROSS the object's ACTUAL (graze-ROTATED) IN-PLANE axis -- the re-read YAW
+            is respected (Fix 1) while staying in the planner's in-plane top-down assumption: a curved body (banana)
+            can settle with a small OUT-OF-PLANE tilt, and feeding the full 3D axis tilted the recovery grasp into a
+            wrist OVER-STRETCH the in-plane relax-tilt ladder can't undo (verified: banana retry j4 1.57 -> the flat
+            axis keeps it <1.45). ``None`` stays None (round: free roll, snapped to the home branch)."""
+            a = grasp.world_long_axis(laxis, np.asarray(ref_quat, float))
+            if a is None:
+                return None
+            a = np.array([a[0], a[1], 0.0], float)                      # FLATTEN: the jaws close across the IN-PLANE axis
+            n = np.linalg.norm(a)
+            return a / n if n > 1e-6 else None                          # axis ~vertical -> no in-plane constraint (None)
+
+        def _plan_grasp_at(i, gci, dyaw=0.0, ref_quat=None):
+            """RE-PLAN the wrist-comfortable grasp AT an arbitrary grasp centre ``gci`` (the noised attempt target
+            OR the missed-env re-read pose) using the SAME relax-tilt the clean path uses, but AT this centre
+            (select_grasp_tilt_at) so the wrist never over-stretches -- this is the fix for the over-limit |j4|:
+            a noised/re-read target shifts the reach, so the CLEAN gqA[i] tilt (chosen at gc[i]) can saturate;
+            re-selecting the tilt here keeps every attempt wrist-comfortable. ``dyaw`` adds the small noise yaw
+            wobble (world +Z) on top -- the perturbation that grazes the object without changing the approach.
+
+            ``ref_quat`` (Fix 1 -- the RE-READ orientation): when given, the grasp ORIENTATION is built from the
+            object's LIVE quaternion (its grasp axis rotated by ``ref_quat``) instead of the stale stored yaw, so a
+            noisy graze that ROTATED the object is RESPECTED -- the recovery gripper yaw TRACKS the re-read pose.
+            ``None`` (the noised first attempt, planned before the object moves) keeps the stored-yaw orientation.
+            Returns (gqi, tzi): the grasp quat + its world approach axis (the carry/place uses the clean,
+            batched-validated ``place_tail``/``place_tilt`` below -- the contract's 'then place_tail')."""
+            ref_axis = _ref_axis_from_quat(ref_quat) if ref_quat is not None else _NO_REF
+            apex_z = float(gci[2] + LIFT)                                # the rise-apex reorient frame (a binding one)
+            tilt = grasp.select_grasp_tilt_at(gctx, solve, i, np.asarray(gci, float), apex_z=apex_z,
+                                              ref_axis_world=ref_axis)
+            gqi = grasp.grasp_quat_at(gctx, i, gci[0], gci[1], tilt, ref_axis_world=ref_axis).astype(np.float64)
+            if abs(float(dyaw)) > 1e-9:
+                gqi = grasp_retry.yaw_wxyz(gqi, float(dyaw)).astype(np.float64)   # small world-Z yaw wobble (noise)
+            tzi = _R_from_wxyz(gqi) @ np.array([0.0, 0.0, 1.0])
+            return gqi, tzi
+
+        def clean_attempt_wps(i):
+            """The CLEAN (non-noised) phase-0 attempt: the locked ``pick_wps(i)`` with the redundant SECOND ``at``
+            dwell dropped (home->pre->at->close->lift). WHY drop it: the double-``at`` is an 80-step OPEN-gripper
+            settle that, in the CLEAN single-phase path, is contiguous with the close ramp so the no-hold checker
+            absorbs it into the (excluded) gripper-ramp dwell. In the TWO-PHASE retry, the multi-phase trim
+            re-segments it into a SEPARATE open-gripper static run that the checker then flags as a (benign, object-
+            not-yet-grasped) 'hold' (verified: keeping it pushed the no-hold to 10 frames, over the <=8 gate, with NO
+            penetration benefit -- the pen's bite is firm-grip CREEP during the held settle, not the pre-close seat).
+            Dropping the duplicate ``at`` removes that artifact; the ``close`` waypoint still provides the full 80-step
+            grasp settle. (Opt-in path only -- the DEFAULT clean path keeps the literal ``pick_wps`` double-``at``.)"""
+            w = pick_wps(i)
+            return [w[0], w[1], w[2], w[4], w[5]]                        # start, pre, at, close, lift (drop 2nd at)
+
+        def noised_pick_wps(i, dxy, dz, dyaw):
+            """The NOISED first attempt for env i: aim the pre+at at the perturbed target ``gc[i]+[dxy,dz]`` with a
+            grasp orientation RE-PLANNED (wrist-comfortable) at that target + the noise yaw wobble. Object-agnostic
+            (the offset lives in the arm's action space). The arm reaches a slightly-wrong pose and may close on
+            nothing / graze the object -> the miss the retry recovers from. home->pre->at->close->lift (single
+            ``at`` -- the no-hold artifact fix; the close still provides the settle)."""
+            gci = gc[i] + np.array([float(dxy[0]), float(dxy[1]), float(dz)])
+            gqi, tzi = _plan_grasp_at(i, gci, dyaw=dyaw)
+            start = pick_wps(i)[0]                                       # reuse the exact clean home start waypoint
+            return [
+                start,
+                ("pre",   gci - APP * tzi,         gqi, OPEN),
+                ("at",    gci,                     gqi, OPEN),
+                ("close", gci,                     gqi, CLOSE),
+                ("lift",  gci + [0, 0, LIFT],      gqi, CLOSE),
+            ]
+
+        def retry_pick_wps(i, obj_now):
+            """MISSED-env recovery: rise off the empty close + reopen, RE-PLAN the grasp AT the object's re-read
+            pose (NO noise the 2nd time), descend, close, lift -> then the SAME clean ``place_tail``. The grasp is
+            re-planned with the SAME relax-tilt the clean path uses, but AT the re-read centre (_plan_grasp_at ->
+            select_grasp_tilt_at), so the recovery PICK never over-stretches (the apex reorient is folded in); the
+            place reuses the batched, wrist-margin-validated clean carry machinery (``place_tail`` re-yaws its
+            carry to the recovery grasp branch). Single ``at`` (the close provides the settle; no-hold fix above)."""
+            quat_now = np_(cube.get_quat())                             # the object's LIVE quaternion (re-read)
+            gcr = grasp_center_world(obj_now, quat_now)[i]              # world grasp CENTRE at the re-read pose
+            gcr = gcr.copy(); gcr[2] += grasp_dz                         # same body-centre grasp nudge as the clean gc
+            apex = gcr + np.array([0.0, 0.0, LIFT])                      # rise apex above the re-read object (reorient)
+            # Fix 1: build the recovery grasp ORIENTATION from the object's RE-READ quaternion (not the stale stored
+            # yaw), so a noisy graze that ROTATED the object is respected -- the gripper yaw TRACKS the re-read pose.
+            gqi, tzi = _plan_grasp_at(i, gcr, ref_quat=quat_now[i])      # wrist-comfortable grasp at the re-read pose
+            liftr = gcr + np.array([0.0, 0.0, LIFT])
+            # RE-SELECT the carry-over-bowl tilt for THIS recovery grasp orientation (the clean batch place_tilt was
+            # chosen for the clean grasp; a re-read recovery grasp can saturate the carry wrist -- the banana j4 fix).
+            # Pass liftr so the lift->over-bowl SWING (where the wrist re-yaw peaks mid-swing) is folded into the probe.
+            place_tilt_r = grasp.select_place_tilt_at(gctx, solve, i, gqi, lift_pose=liftr + [0, 0, 0.02])
+            recover = [
+                ("rise",     gc[i] + [0, 0, LIFT], gqA[i], OPEN),        # reopen + rise off the missed (empty) close
+                ("reorient", apex,                 gqi,    OPEN),        # over the re-read object, re-planned grasp
+                ("pre",      gcr - APP * tzi,      gqi,    OPEN),        # descend along the re-planned approach axis
+                ("at",       gcr,                  gqi,    OPEN),        # single at (the close provides the settle;
+                #                                                          a double-at here is re-segmented by the
+                #                                                          two-phase trim into a flagged no-hold dwell)
+                ("close",    gcr,                  gqi,    CLOSE),
+                ("lift",     liftr,                gqi,    CLOSE),
+            ]
+            return recover + place_tail(i, liftr, gqi, place_tilt_i=place_tilt_r)   # the contract's 'then place_tail'
+
+        # ``rest_z`` = the object's settled resting height (god-mode): the cube at rest sits at root0[:,2]; a
+        # caught object rises >lift_min above it, a missed one stays on the table. Object-agnostic.
+        rest_z = root0[:, 2].copy()
+        env_phases, _caught = grasp_retry.run_grasp_retry(
+            N=N, noise=noise, gc=gc, gqA=gqA, LIFT=LIFT, APP=APP, OPEN=OPEN, CLOSE=CLOSE,
+            pick_wps=clean_attempt_wps, noised_pick_wps=noised_pick_wps, retry_pick_wps=retry_pick_wps,
+            place_tail=place_tail, run_phase=_run_phase_bounded, read_obj_pos=read_obj_pos,
+            read_ee_pos=read_ee_pos, brief_settle=brief_settle, rest_z=rest_z)
+        # Tlist + phase_bounds + env_phases are populated by _run_phase_bounded inside the skill's two run_phase
+        # calls (phase 0 = the attempt, phase 1 = the per-env outcome); the recorder below trims each env to its
+        # own [0,1] phase concatenation (hold-free). Nothing else to do -- the skill owns the orchestration.
 
     T = sum(Tlist)
     lift_pos_z = np.max(np.stack(cubez, 1), axis=1)            # per-env max cube height reached during the run
@@ -879,8 +1040,17 @@ def collect(N, seed, data_dir, out_dir, target=None):
         prev = np.clip(seq[1:] - 1, 0, dj.shape[1] - 1)         # the delta ARRIVING into seq[k] (k>=1)
         arm_mv = np.concatenate([[True],                        # seq[0] always kept
                                  dj[e, prev, arm_lo[e]:arm_lo[e] + 6].max(axis=1) > ARM_EPS])
-        fwd = np.clip(seq + GRIP_W, 0, Tr - 1)                  # a forward window on the active-gripper value
-        grip_mv = np.abs(gv[e, fwd] - gv[e, seq]) > GRIP_NET    # a real gripper TRANSITION (net move) at seq[k]
+        # grip_mv = the gripper is RAMPING right AT frame k -- a net change across a TIGHT centred window (k-1..k+1).
+        # WHY centred-and-tight (not the old 6-ahead forward window): the forward window tagged a STEADY held lift at
+        # the phase barrier as 'moving' whenever a ramp was within 6 frames AHEAD (the recovery reopen) and KEPT it,
+        # and a wide backward window did the same for the close ramp BEHIND a caught-and-lifted hold -- both left a
+        # >8-frame static-arm run the no-hold gate flagged (the universal retried/caught-demo 10-13f phase-barrier
+        # hold). A tight centred window fires ONLY on the actual ramp frames (the designed close/reopen/release
+        # dwell), so a held empty-close OR caught lift at the barrier COLLAPSES to the SETTLE while the ramp itself
+        # stays kept. Multi-phase ONLY -- the clean single-phase path returns above, so it is byte-identical.
+        _gw = 1                                                 # tight half-window: a ramp at k changes gv across k-1..k+1
+        fwd1 = np.clip(seq + _gw, 0, Tr - 1); bwd1 = np.clip(seq - _gw, 0, Tr - 1)
+        grip_mv = np.abs(gv[e, fwd1] - gv[e, bwd1]) > GRIP_NET   # a gripper TRANSITION ramping AT seq[k]
         last = int(np.where(arm_mv[1:])[0][-1]) + 1 + 2 if arm_mv[1:].any() else len(seq) - 1   # last arm motion + settle
         last = min(last, len(seq) - 1)
         if single_phase:                                        # one trajectory: keep verbatim up to the home tail
