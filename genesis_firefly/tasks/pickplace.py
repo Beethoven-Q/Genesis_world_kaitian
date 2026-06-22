@@ -42,6 +42,15 @@ from skills.executor import BatchExecutor  # the ONE smooth motion path (densify
 from skills.penetration import PenetrationTracker, ABNORMAL_THRESH_M  # the #1 collision gate  # noqa: E402
 from registry.object_spec import REGISTRY  # noqa: E402
 import world.object_factory as obj_factory  # the ONE shared spec->sim-entity builder (collision+visual+texture); aliased NOT ``objf`` (a local var below)  # noqa: E402
+# The TASK-AGNOSTIC, REUSABLE DR harness (dr/ package): scope A (scene) + scope C (visual) are AUTOMATIC for
+# every task; scope B is per-object (this task names its target via TaskSpec). The DR sampling/application/plan
+# that used to live INLINE here (sample_phys_dr, the colour draws, the batched setters, the per-demo dr_* attrs)
+# now lives in dr/ -- this task only NAMES its scope-B field (the grasp target) and CALLS into the harness. The
+# distractor TYPE/POSE placement stays here for now (task-layout-specific; Phase 3 extracts it).
+import dr as drpkg  # noqa: E402
+from dr.sampler import TaskSpec, sample_env_phys, sample_build_colours, sample_post_build  # noqa: E402
+from dr.apply import apply_build_dr, apply_env_dr  # noqa: E402
+from dr.plan import demo_dr_attrs  # noqa: E402
 import imageio.v3 as iio  # noqa: E402
 import cv2  # noqa: E402
 import h5py  # noqa: E402
@@ -63,73 +72,11 @@ TARGET = os.environ.get("TARGET", "cube")
 
 # ---- DR-STRATEGIST sweep hooks (docs/agents.md DR strategist + dr/sweep.py) -----------------------------------
 # The DR strategist EXPLORES wider/narrower ranges WITHOUT editing this file: it sets a few env-var multipliers
-# that scale the per-env range HALF-WIDTHS in sample_phys_dr. Defaults are EXACTLY 1.0, so an unset environment
-# reproduces the v2 collection byte-for-byte (the verify gate proves this). The multipliers scale ONLY the
-# half-width of each band about its FIXED centre — they never move a centre, never touch the anti-coupling sgn/
-# arm-side logic, and never relax the cube<->bowl clearance floor (so a wider pose can never spawn cube-in-bowl).
-#   DR_POSE_SCALE  -> bowl xy + cube xy half-widths (pose breadth; the main axis to push to MAX extent)
-#   DR_MASS_SCALE  -> cube mass-shift half-width
-#   DR_FRIC_SCALE  -> robot link friction-ratio half-width
-# This is the MINIMAL hook the sweep tool needs to test a candidate range to the edge of usability before the
-# main agent commits an edit to the (still hand-written) ranges above. A future fully-declarative dr/ config
-# would replace these in-line scales; for the MVP this keeps the locked collector untouched and reproducible.
-def _dr_scale(name):
-    try:
-        return float(os.environ.get(name, "1.0"))
-    except (TypeError, ValueError):
-        return 1.0
-
-
-def sample_phys_dr(N, rng, lay, spec):
-    """Per-env physics DR (no visuals — the stage owns the environment/background DR)."""
-    ho = lay.object_table_height
-    ps = _dr_scale("DR_POSE_SCALE")                            # pose half-width multiplier (1.0 = v2 default)
-    side_is_left = rng.rand(N) < 0.5
-    sgn = np.where(side_is_left, 1.0, -1.0)
-    tabZ = ho + (rng.rand(N) - 0.5) * 0.10                     # object-table height +/-5cm
-    bowx = 0.40 + (rng.rand(N) - 0.5) * 0.10 * ps
-    bowy = sgn * (0.05 + (rng.rand(N) - 0.5) * 0.07 * ps)
-    cubx = 0.40 + (rng.rand(N) - 0.5) * 0.12 * ps
-    cuby = sgn * (0.185 + (rng.rand(N) - 0.5) * 0.10 * ps)
-    # keep the TARGET CLEAR of the bowl so the open gripper doesn't bump the bowl on the grasp descent. The
-    # MAJORITY (~80%) get a generous clearance; a MINORITY (~20%) are allowed close (hard edge cases -> useful
-    # recovery data, per the DR "accept hard edge cases" rule). The hard floor forbids target-in-bowl.
-    # HARD floor: the cube uses the LOCKED 0.125 (cube circumradius ~3.5cm + bowl radius ~7.5cm ~= 11cm, so
-    # 12.5cm centre-to-centre keeps the cube body fully OUTSIDE the bowl wall). A BIGGER target (banana/book,
-    # footprint radius up to ~11cm) needs MORE clearance or its body would still overlap the bowl wall, so for a
-    # non-cube target the floor SCALES with the target footprint: footprint_radius + bowl_radius(0.075) + 1.5cm
-    # margin. (For the cube this formula gives ~0.1254 ~= the locked 0.125, so cube stays byte-for-byte on the
-    # literal.) The previous loop could EXHAUST its tries on an unlucky/infeasible draw and SILENTLY ship a still-
-    # overlapping target -> the firm solver ejected it off the (ground-plane-less) table -> a 6m garbage waypoint
-    # -> the 10x trajectory blowup (2026-06-19, docs/roadmap.md). FIX: after rejection sampling, CLAMP any still-
-    # bad env's target radially outward from the bowl to exactly the hard floor (a guaranteed-clear, on-table,
-    # correct-side pose) so the target can NEVER spawn intersecting the bowl, regardless of luck/feasibility.
-    CLR_HARD = 0.125 if spec.is_cube else float(_footprint_radius(spec) + 0.075 + 0.015)
-    clr = np.where(rng.rand(N) < 0.8, max(0.17, CLR_HARD + 0.045), CLR_HARD)
-    for _ in range(60):
-        bad = np.hypot(cubx - bowx, cuby - bowy) < clr
-        if not bad.any():
-            break
-        nb = int(bad.sum())
-        cubx[bad] = 0.40 + (rng.rand(nb) - 0.5) * 0.12 * ps
-        cuby[bad] = sgn[bad] * (0.185 + (rng.rand(nb) - 0.5) * 0.10 * ps)
-    # GUARANTEED fallback: push any env STILL inside the hard floor radially out to exactly CLR_HARD. Direction
-    # = bowl->cube (away from the bowl); if the cube sits exactly on the bowl centre, push along the arm side
-    # (+sgn y) so it stays on the object table and on the correct half. This makes a cube-in-bowl spawn -- and
-    # thus the off-table ejection -- impossible by construction.
-    bad = np.hypot(cubx - bowx, cuby - bowy) < CLR_HARD
-    if bad.any():
-        dx, dy = cubx[bad] - bowx[bad], cuby[bad] - bowy[bad]
-        dn = np.hypot(dx, dy)
-        ux = np.where(dn > 1e-6, dx / np.maximum(dn, 1e-6), 0.0)
-        uy = np.where(dn > 1e-6, dy / np.maximum(dn, 1e-6), sgn[bad])   # degenerate: push along the arm side
-        cubx[bad] = bowx[bad] + ux * CLR_HARD
-        cuby[bad] = bowy[bad] + uy * CLR_HARD
-    yaw = (rng.rand(N) - 0.5) * np.radians(180)
-    ms = _dr_scale("DR_MASS_SCALE")                            # cube mass-shift half-width multiplier
-    mass_shift = ((rng.rand(N, 1) - 0.5) * 0.04 * ms).astype(np.float32)
-    return dict(side_is_left=side_is_left, sgn=sgn, tabZ=tabZ, bowx=bowx, bowy=bowy,
-                cubx=cubx, cuby=cuby, yaw=yaw, mass_shift=mass_shift)
+# (DR_POSE_SCALE / DR_MASS_SCALE / DR_FRIC_SCALE) that scale the per-env range HALF-WIDTHS. Defaults are EXACTLY
+# 1.0, so an unset environment reproduces the v2 collection byte-for-byte. The ranges + the scale hook now live
+# in the REUSABLE dr/ package (dr.sampler) -- this task no longer owns DR logic; it NAMES its scope-B target via
+# a TaskSpec and calls the harness. ``_dr_scale`` is re-exported (sweep/docs reference it) as a thin delegate.
+from dr.sampler import _dr_scale  # noqa: E402,F401  (re-export for back-compat; the multiplier hook lives in dr/)
 
 
 # ============================================================================ #
@@ -349,27 +296,24 @@ def collect(N, seed, data_dir, out_dir, target=None):
     print(f"[COLLECT] TARGET = {target!r} ({spec.language_name}); source={spec.source} "
           f"extents={np.round(spec.scaled_extents(), 3).tolist()} "
           f"ref_axis={'long' if spec.elongated else ('face' if spec.is_cube else 'none(round)')}", flush=True)
-    dr = sample_phys_dr(N, rng, lay, spec)
+    # ---- DR (reusable dr/ harness) -- this task NAMES its scope-B field (the grasp target) via a TaskSpec;
+    # scopes A (scene) + C (visual) are AUTOMATIC (the stage owns + applies them). The per-env physics draws +
+    # the per-build colour draws are made by the harness in the EXACT pre-refactor RNG order (the parity lever).
+    task_spec = TaskSpec(target=target, target_spec=spec, object_table_height=lay.object_table_height)
+    env_dr = sample_env_phys(N, rng, task_spec)                 # per-env phys DR (side/tabZ/pose/yaw/mass)
+    dr = env_dr.as_dict()                                       # legacy ``dr`` dict the distractor samplers index
 
     # --- task objects: the coloured TARGET + a convex-decomposition bowl, distinct from the table colour ---
-    # COLOUR (owner: a banana rendered PINK -- WRONG): the GRASP TARGET's colour comes from its REALISTIC
-    # per-object palette (spec.target_palette) -- a banana is yellow (mostly) or green (unripe), an apple red or
-    # green, a pen a normal marker colour, a tennis ball yellow-green. This FIXES the bug where the cube's FREE
-    # random distinct-from-table colour (``cube_col``) was applied to EVERY target. The CUBE has no palette
-    # (target_palette=None) so it keeps its free random colour -> the cube collection stays byte-for-byte. The
-    # bowl always uses a free distinct colour (it is a container, not a realistically-coloured object).
-    ch, cube_col = stage.distinct_object_color()                 # the cube's free random colour (+ a hue to avoid)
-    tgt_col = obj_factory.target_color(spec, cube_col, stage.rng)   # realistic palette colour (cube -> cube_col)
-    _, bowl_col = stage.distinct_object_color(ch)
-    cube = obj_factory.spawn_target(stage.scene, spec, tgt_col, pos_xy=(0.40, 0.18), z=0.30)   # the TARGET entity
-    bowl = stage.scene.add_entity(gs.morphs.Mesh(file=BOWL_OBJ, convexify=True,
-                                  decompose_object_error_threshold=0.04, decimate=False),
-                                  material=gs.materials.Rigid(rho=400.0, friction=1.0),
-                                  surface=gs.surfaces.Smooth(color=bowl_col))
+    # COLOUR policy (per-object realistic palette / native texture / free cube colour; the banana-PINK fix) lives
+    # in the harness (dr.sample_build_colours -> world.object_factory.target_color). The build-DR draw order is
+    # byte-for-byte: target free colour -> target palette colour -> bowl colour, then spawn target + bowl.
+    build_dr = sample_build_colours(stage, task_spec)           # per-build colours (target + bowl), RNG-ordered
+    cube, bowl = apply_build_dr(stage, task_spec, build_dr, pos_xy=(0.40, 0.18), z=0.30)  # spawn (colour @ build)
 
     # --- distractor / clutter objects (REQUIRED DR): 2-3 random irrelevant objects on the OBJECT table, in OPEN
     # areas, rejection-sampled OUT of the active arm's swept corridor (grasp + cube->bowl carry + bowl->home).
-    # ENTITIES are created here (per-build types); their per-env POSES are applied after build() below. ---
+    # ENTITIES are created here (per-build types); their per-env POSES are applied after build() below. The
+    # TYPE/POSE samplers stay task-local (corridor-geometry-specific; Phase 3 extracts them into dr/). ---
     dist_ents, dist_names, dist_xy, dist_yaw = obj_factory.spawn_distractors(
         stage, dr, rng, choose_distractor_types, sample_distractor_poses, target=target)
     dist_specs = [REGISTRY[nm] for nm in dist_names]
@@ -383,22 +327,22 @@ def collect(N, seed, data_dir, out_dir, target=None):
     print(f"[COLLECT] built N={N} (one parallel build, {N} environments) in {time.time()-t0:.1f}s", flush=True)
 
     # ---- apply DR + settle ----
+    # POST-BUILD per-env draws (RNG-ordered in the harness): the 50/50 distractor on/off mask, THEN the robot-
+    # link friction ratio. Drawn here (after build) BEFORE the batched setters, matching the pre-refactor order
+    # exactly (has_dist then fric). 50/50 (owner directive, standing for ALL tasks): ~half the trials have NO
+    # distractors (SIMPLE data -> the robot learns the core task fast), ~half are cluttered.
+    _post = sample_post_build(N, stage, robot)
+    has_dist = env_dr.has_dist = _post["has_dist"]
+    env_dr.fric = _post["fric"]
     ho = lay.object_table_height
     tabZ, bowx, bowy, cubx, cuby = dr["tabZ"], dr["bowx"], dr["bowy"], dr["cubx"], dr["cuby"]
     side_is_left, yaw = dr["side_is_left"], dr["yaw"]
-    qz = np.stack([np.cos(yaw / 2), 0 * yaw, 0 * yaw, np.sin(yaw / 2)], 1).astype(np.float32)
-    stage.otable.set_pos(np.stack([np.full(N, lay.seam_x + lay.object_table_depth / 2), np.zeros(N), tabZ - ho / 2], 1).astype(np.float32))
-    stage.set_otable_top_z(tabZ)                                # keep the textured table-top flush with the height DR
-    bowl.set_pos(np.stack([bowx, bowy, tabZ + BOWL_HALF_H + 0.003], 1).astype(np.float32))
-    cube_top = tabZ + spec.scaled_extents()[2] / 2 + 0.002
-    cube.set_pos(np.stack([cubx, cuby, cube_top + 0.01], 1).astype(np.float32)); cube.set_quat(qz)
-    # 50/50 per-env (owner directive, standing for ALL tasks): ~half the trials have NO distractors (SIMPLE
-    # data -> the robot learns the core task fast), ~half are cluttered. Absence = park the (fixed-count)
-    # distractor entities far BELOW the scene (out of every camera + out of collision) for those envs; they
-    # fall away harmlessly and never touch the workspace.
-    has_dist = rng.rand(N) < 0.5
+    # The BATCHED per-env setters (scope A object-table height + re-glue the textured top; scope B bowl/target
+    # pose + yaw + mass-shift + robot-link friction ratio) are issued by the harness in the SAME order as before.
+    apply_env_dr(stage, task_spec, cube, bowl, env_dr, robot)
     # distractor per-env poses: drop each just above the table at its rejection-sampled XY with a random yaw
-    # (in-plane spin). They settle with the cube/bowl during settle_home() below.
+    # (in-plane spin). Absence (50/50) = park the entities far BELOW the scene (out of every camera + collision)
+    # for those envs; they fall away harmlessly and never touch the workspace. They settle with cube/bowl below.
     for k, e in enumerate(dist_ents):
         dsp = dist_specs[k]
         drz = np.array([dsp.rest_root_z(z) for z in tabZ], np.float32) + 0.01   # per-env table-height-aware drop
@@ -406,15 +350,6 @@ def collect(N, seed, data_dir, out_dir, target=None):
         e.set_pos(np.stack([dist_xy[k, :, 0], dist_xy[k, :, 1], drz], 1).astype(np.float32))
         dy = dist_yaw[k]
         e.set_quat(np.stack([np.cos(dy / 2), 0 * dy, 0 * dy, np.sin(dy / 2)], 1).astype(np.float32))
-    try:
-        cube.set_mass_shift(dr["mass_shift"])
-        # robot link friction-ratio band 1.0 +/- 0.3 (DR_FRIC_SCALE scales the half-width; clamp >=0 so a wide
-        # sweep can't request negative friction). Default scale 1.0 -> the v2 0.7..1.3 band, byte-for-byte.
-        fs = _dr_scale("DR_FRIC_SCALE")
-        fric = (1.0 + (rng.rand(N, robot.entity.n_links) - 0.5) * 0.6 * fs).clip(0.0)
-        robot.entity.set_friction_ratio(fric.astype(np.float32))
-    except Exception as e:
-        print(f"[COLLECT] mass/fric DR skipped: {e}", flush=True)
     # Lower each distractor's CoM below its geometric centre so it SELF-RIGHTS and rests stably instead of slowly
     # rolling (a curved banana on a convex base is otherwise metastable and creeps a few cm over the episode --
     # which is intrinsic, NOT an arm contact, but it inflates the displacement metric). A real banana's mass is
@@ -1073,7 +1008,6 @@ def collect(N, seed, data_dir, out_dir, target=None):
             pg.create_dataset("position", data=eepos[e, ki].astype(np.float32))
             pg.create_dataset("orientation", data=eequat[e, ki].astype(np.float32))
             d.attrs["num_samples"] = Te; d.attrs["success"] = bool(placed[e]); d.attrs["seed"] = int(seed)
-            d.attrs["arm"] = "left" if side_is_left[e] else "right"
             # PENETRATION GATE attrs (owner #1): worst-ever solid-solid interpenetration (mm) + the abnormal
             # flag. ``penetrating`` True means the demo is REJECTED -- ``success`` is already forced False
             # above, so the success_only LeRobot export drops it; this poisoned data is never shipped.
@@ -1082,24 +1016,14 @@ def collect(N, seed, data_dir, out_dir, target=None):
             # DEGENERATE-SETTLE flag: the cube was ejected off the table at spawn (overlapping bowl) -> the
             # grasp targets a phantom location -> demo REJECTED (success already forced False above).
             d.attrs["degenerate"] = bool(degenerate[e])
-            d.attrs["hdr"] = os.path.basename(stage.hdrs[e])
-            d.attrs["has_distractors"] = bool(has_dist[e])     # 50/50 per-env: was this a cluttered trial?
-            d.attrs["distractors"] = ",".join(dist_names) if has_dist[e] else ""
-            # PER-DEMO DR PLAN (the ``DRPlan`` of docs/domain_randomization.md, made traceable): the exact
-            # per-env physics-DR VALUES this demo sampled, plus the sweep multipliers in force. This is what
-            # makes the DR strategist's failure diagnosis DEFENSIBLE -- it can correlate an outcome (success/
-            # penetrating/degenerate) with WHERE in the DR space the env landed (cube/bowl pose, table height,
-            # mass, yaw, reach), and measure the achieved DIVERSITY. Prefixed ``dr_`` so it never collides with
-            # the outcome attrs above. Values are arm-frame: cube/bowl y are signed by the active arm side.
-            d.attrs["dr_cubx"] = float(cubx[e]); d.attrs["dr_cuby"] = float(cuby[e])
-            d.attrs["dr_bowx"] = float(bowx[e]); d.attrs["dr_bowy"] = float(bowy[e])
-            d.attrs["dr_tabZ"] = float(tabZ[e]); d.attrs["dr_yaw"] = float(yaw[e])
-            d.attrs["dr_mass_shift"] = float(dr["mass_shift"][e, 0])
-            d.attrs["dr_clr"] = float(np.hypot(cubx[e] - bowx[e], cuby[e] - bowy[e]))  # cube<->bowl centre dist
-            d.attrs["dr_reach"] = float(np.hypot(cubx[e], cuby[e]))                    # cube dist from arm base
-            d.attrs["dr_pose_scale"] = _dr_scale("DR_POSE_SCALE")
-            d.attrs["dr_mass_scale"] = _dr_scale("DR_MASS_SCALE")
-            d.attrs["dr_fric_scale"] = _dr_scale("DR_FRIC_SCALE")
+            # PER-DEMO DR PLAN + scope-A/B/C TRACE (the ``DRPlan`` of docs/domain_randomization.md, made
+            # traceable): assembled by the reusable harness (dr.plan.demo_dr_attrs) so EVERY task writes the
+            # SAME dr_* keys. It records the realised per-env DR values (arm, hdr, distractors, cube/bowl pose,
+            # table height, mass, yaw, clearance, reach + the sweep multipliers in force) so the DR strategist
+            # can correlate an outcome with WHERE in the DR space the env landed. Values are arm-frame (cube/bowl
+            # y are signed by the active arm side). Merged into .attrs (outcome attrs above are the task's own).
+            for _k, _v in demo_dr_attrs(env_dr, e, dist_names=dist_names).items():
+                d.attrs[_k] = _v
             if not FAST:                                        # the sensor-only policy stream (kept frames only)
                 for nm in ("cam_side", "cam_lw", "cam_rw"):
                     vid = np.stack([cam_steps[nm][t][e] for t in ki])
